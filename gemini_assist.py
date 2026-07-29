@@ -1,38 +1,31 @@
 # -*- coding: utf-8 -*-
 """
-Gemini API 활용 — 역할을 의도적으로 제한한다.
+Gemini(Agent Platform express mode) 활용 — 역할을 의도적으로 제한한다.
 
   - 하지 않는 것: 경로 최적화, 통합 판정, 요금 계산 (전부 결정론적
     로직으로 처리 — 재현성과 설명가능성 확보 목적)
   - 하는 것: (1) 화주의 자연어 입력을 구조화된 필드로 파싱
              (2) 계산된 비교 결과를 화주에게 설명하는 문장 생성
+             (3) 화물 종류를 카테고리로 분류
+
+인증 방식: "Agent Platform Model APIs" 키(AQ.로 시작하는 형식)를
+공식 google-genai SDK의 express mode(`vertexai=True, api_key=...`)로
+사용. 서비스 계정 JSON이나 프로젝트 ID 없이 API 키 하나로 인증되며,
+Google Cloud 무료 크레딧을 그대로 소진할 수 있음.
 """
 
 import json
 
-import requests
+from google import genai
 
-GEMINI_API_KEY = ""  # TODO: Streamlit secrets 등으로 주입
+GEMINI_API_KEY = ""  # TODO: Streamlit secrets 등으로 주입 (Agent Platform Model APIs 키)
 GEMINI_MODEL = "gemini-3.5-flash"
-GEMINI_URL = (
-    f"https://generativelanguage.googleapis.com/v1beta/models/"
-    f"{GEMINI_MODEL}:generateContent"
-)
 
 
 def _call_gemini(prompt: str) -> str:
-    resp = requests.post(
-        GEMINI_URL,
-        headers={
-            "Content-Type": "application/json",
-            "x-goog-api-key": GEMINI_API_KEY,
-        },
-        json={"contents": [{"parts": [{"text": prompt}]}]},
-        timeout=15,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    return data["candidates"][0]["content"]["parts"][0]["text"]
+    client = genai.Client(vertexai=True, api_key=GEMINI_API_KEY)
+    response = client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
+    return response.text
 
 
 def parse_free_text_order(text: str) -> dict:

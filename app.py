@@ -38,7 +38,7 @@ import gemini_assist as _gemini_mod
 
 _geocode_mod.GOOGLE_MAPS_API_KEY = st.secrets.get("GOOGLE_MAPS_API_KEY", "")
 _road_cost_mod.KAKAO_REST_API_KEY = st.secrets.get("KAKAO_REST_API_KEY", "")
-_gemini_mod.GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
+_gemini_mod.GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")  # Agent Platform Model APIs 키
 # TODO: TAGO_API_KEY는 아직 어떤 모듈에서도 쓰지 않음 (여객열차 참고용 연동 시 활용 예정)
 TAGO_API_KEY = st.secrets.get("TAGO_API_KEY", "")
 
