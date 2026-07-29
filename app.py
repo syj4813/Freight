@@ -20,6 +20,7 @@ from road_cost import (
     get_road_distance_duration,
     estimate_truck_fare,
     estimate_quick_fare,
+    select_truck_tier,
 )
 from rail_freight_nodes import CONTAINER_MAX_TON
 from ktx_tucking import check_ktx_tucking_eligible, KTX_TUCKING_STATIONS
@@ -237,6 +238,7 @@ if submitted:
     # ── 1) 트럭 단독 (기준) — 소요시간은 실시간, 요금은 추정치 ──
     try:
         road = get_road_distance_duration(origin_lng, origin_lat, dest_lng, dest_lat)
+        truck_tier = select_truck_tier(weight_ton)
         truck_fare = apply_surcharge(estimate_truck_fare(road["distance_km"], weight_ton), cargo_category)
         emission_cmp = calculate_truck_vs_rail_savings(road["distance_km"], weight_ton)
         rows.append({
@@ -246,7 +248,7 @@ if submitted:
             "요금(원)": truck_fare,
             "GWP(kgCO2eq)": emission_cmp["truck"]["gwp_kg_co2e"],
             "PM(kg)": emission_cmp["truck"]["pm_kg"],
-            "데이터 성격": "시간: 실시간 / 요금·배출량: 추정치 (화물종류 할증 반영)",
+            "데이터 성격": f"시간: 실시간 / 요금·배출량: 추정치 ({truck_tier.label} 차급, 화물종류 할증 반영)",
         })
     except Exception as e:
         st.warning(f"카카오맵 API 호출 실패: {e} (API 키 확인 필요)")

@@ -7,26 +7,53 @@
         (특정 사설 업체 요금표가 아닌, 공적 참고 기준을 쓰는 이유는
          "왜 이 값이냐"는 질문에 근거를 댈 수 있어야 하기 때문)
 
-⚠️ FARE_BASE_WON, FARE_PER_KM_WON, FARE_PER_TON_WON은 예시 계수입니다.
-   제출 전 국토부 화물 표준운임 공고 자료로 실제 계수를 보정해야 합니다.
+⚠️ 요금 계수(TRUCK_TIERS 등)는 예시치입니다. 제출 전 국토부 화물
+   표준운임 공고 자료 또는 실제 차종별 요금표로 계수를 보정해야 합니다.
 """
+
+from dataclasses import dataclass
 
 import requests
 
 KAKAO_REST_API_KEY = ""  # TODO: Streamlit secrets 등으로 주입
 
 # 근사 요금 계수 (예시치, TODO: 보정 필요)
-TRUCK_FARE_BASE_WON = 50_000
-TRUCK_FARE_PER_KM_WON = 700
-TRUCK_FARE_PER_TON_WON = 15_000
+# ⚠️ 이전 버전은 화물량과 무관하게 소형 트럭 단가(톤당 15,000원)를
+#    무한정 곱해서, 화물이 많아질수록 트럭 요금이 비현실적으로 커지는
+#    문제가 있었습니다(실제로는 화물이 늘면 5톤·11톤·25톤 등 더 큰
+#    차량으로 바뀌고, 큰 차량일수록 톤당 단가는 오히려 낮아지는 규모의
+#    경제가 있음). 차량 톤급별 단계 요금으로 교체합니다.
+#
+# 각 구간은 "이 톤수까지 실을 수 있는 가장 작은 차량" 기준입니다.
+# TODO: 실제 화물 운송사 차종별 요금표로 계수 보정 필요.
+@dataclass(frozen=True)
+class TruckTier:
+    max_ton: float
+    label: str
+    base_won: int
+    per_km_won: int
+    per_ton_won: int
+
+
+TRUCK_TIERS: list[TruckTier] = [
+    TruckTier(1.0, "1톤", 50_000, 700, 15_000),
+    TruckTier(2.5, "2.5톤", 70_000, 750, 12_000),
+    TruckTier(5.0, "5톤", 90_000, 800, 9_000),
+    TruckTier(11.0, "11톤", 130_000, 900, 6_000),
+    TruckTier(25.0, "25톤", 180_000, 1_000, 4_000),
+]
+
+# 톤수가 25톤(최대 차급)을 넘으면 이 계수로 계속 계산 — 초과분은 근사치
+_MAX_TIER = TRUCK_TIERS[-1]
 
 QUICK_FARE_BASE_WON = 15_000
 QUICK_FARE_PER_KM_WON = 1_200  # 퀵은 근거리 급행이라 km당 단가가 더 높음
 QUICK_MAX_WEIGHT_KG = 30  # 퀵서비스는 대개 소형화물 한정
 
 # 첫마일/막판마일(출발지↔화물역, 화물역↔도착지) 근거리 운송 — 장거리 트럭과
-# 달리 기본료가 낮음(단거리 배차이므로). km당/톤당 단가는 장거리와 동일하게
-# 재사용. ⚠️ 추정치.
+# 달리 기본료만 낮음(단거리 배차이므로). km당/톤당 단가는 estimate_drayage_fare
+# 안에서 estimate_truck_fare와 동일하게 화물량에 맞는 차급을 선택해 적용
+# (규모의 경제 반영). ⚠️ 추정치.
 DRAYAGE_BASE_WON = 20_000
 
 
@@ -72,13 +99,18 @@ def get_road_distance_duration(
     }
 
 
+def select_truck_tier(weight_ton: float) -> TruckTier:
+    """화물을 실을 수 있는 가장 작은 차급을 선택."""
+    for tier in TRUCK_TIERS:
+        if weight_ton <= tier.max_ton:
+            return tier
+    return _MAX_TIER  # 25톤 초과 — 최대 차급 계수로 근사
+
+
 def estimate_truck_fare(distance_km: float, weight_ton: float) -> int:
-    """거리+중량 기반 근사 요금 (원). ⚠️ 추정치."""
-    fare = (
-        TRUCK_FARE_BASE_WON
-        + distance_km * TRUCK_FARE_PER_KM_WON
-        + weight_ton * TRUCK_FARE_PER_TON_WON
-    )
+    """거리+중량 기반 근사 요금 (원), 차급별 단계 요금 적용. ⚠️ 추정치."""
+    tier = select_truck_tier(weight_ton)
+    fare = tier.base_won + distance_km * tier.per_km_won + weight_ton * tier.per_ton_won
     return round(fare, -3)  # 천원 단위 반올림
 
 
@@ -91,10 +123,14 @@ def estimate_quick_fare(distance_km: float, weight_kg: float) -> int | None:
 
 
 def estimate_drayage_fare(distance_km: float, weight_ton: float) -> int:
-    """첫마일/막판마일 근거리 운송 근사 요금 (원). ⚠️ 추정치."""
-    fare = (
-        DRAYAGE_BASE_WON
-        + distance_km * TRUCK_FARE_PER_KM_WON
-        + weight_ton * TRUCK_FARE_PER_TON_WON
-    )
+    """첫마일/막판마일 근거리 운송 근사 요금 (원). ⚠️ 추정치.
+
+    ⚠️ 이전 버전은 화물량과 무관하게 소형 트럭 톤당 단가를 그대로 곱해서,
+    무거운 화물일수록 드레이지(양단 2회) 비용이 철도 구간 자체보다도
+    커지는 역전 현상이 있었습니다. estimate_truck_fare와 동일하게
+    차급별 단계 요금(규모의 경제)을 적용하되, 단거리 배차라는 특성을
+    반영해 기본료만 낮은 DRAYAGE_BASE_WON을 씁니다.
+    """
+    tier = select_truck_tier(weight_ton)
+    fare = DRAYAGE_BASE_WON + distance_km * tier.per_km_won + weight_ton * tier.per_ton_won
     return round(fare, -3)
