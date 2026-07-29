@@ -27,7 +27,9 @@ from consolidation import ShipperOrder, evaluate_consolidation
 from emission import calculate_truck_vs_rail_savings, calculate_carbon_mileage
 from cargo import classify_cargo_type, apply_surcharge, is_mode_restricted, CargoCategory
 from gemini_assist import classify_cargo_category as gemini_classify_cargo
+from gemini_assist import parse_free_text_order
 from intermodal import estimate_intermodal
+from map_view import build_route_map
 
 st.set_page_config(page_title="소량 화물 운송수단 비교", layout="wide")
 
@@ -74,22 +76,61 @@ def get_mock_pool() -> list[ShipperOrder]:
 st.title("소량 화물 운송수단 비교")
 st.caption("트럭 · 퀵서비스 · KTX특송 · 철도 통합운송 비교 프로토타입")
 
+# ── 챗봇 자동입력: 인터페이스 사용이 어려운 화주를 위한 자연어 입력 ──
+_defaults = {
+    "f_origin": "서울특별시 중구 세종대로",
+    "f_dest": "부산광역시 동구 중앙대로",
+    "f_cargo": "전자부품",
+    "f_weight": 8.0,
+    "f_date": date.today(),
+}
+for k, v in _defaults.items():
+    st.session_state.setdefault(k, v)
+
+with st.expander("💬 말로 설명하면 자동으로 입력해드립니다", expanded=False):
+    free_text = st.text_area(
+        "예: \"부산에서 서울로 냉동식품 500kg 다음 주 화요일까지 보내야 해요\"",
+        key="free_text_input",
+    )
+    if st.button("자동 입력"):
+        if not free_text.strip():
+            st.warning("먼저 화물 내용을 문장으로 입력해 주세요.")
+        else:
+            with st.spinner("입력 내용을 분석하는 중..."):
+                try:
+                    parsed = parse_free_text_order(free_text)
+                    if parsed.get("origin"):
+                        st.session_state["f_origin"] = parsed["origin"]
+                    if parsed.get("destination"):
+                        st.session_state["f_dest"] = parsed["destination"]
+                    if parsed.get("cargo_type"):
+                        st.session_state["f_cargo"] = parsed["cargo_type"]
+                    if parsed.get("weight_kg"):
+                        st.session_state["f_weight"] = float(parsed["weight_kg"])
+                    if parsed.get("desired_date"):
+                        st.session_state["f_date"] = datetime.strptime(
+                            parsed["desired_date"], "%Y-%m-%d"
+                        ).date()
+                    st.success("아래 입력폼에 자동으로 채워넣었습니다. 확인 후 '비교하기'를 눌러주세요.")
+                except Exception as e:
+                    st.error(f"자동 입력 실패: {e}. 아래 폼에 직접 입력해 주세요.")
+
 with st.form("order_form"):
     col1, col2 = st.columns(2)
     with col1:
-        origin_addr = st.text_input("출발지 주소", "서울특별시 중구 세종대로")
+        origin_addr = st.text_input("출발지 주소", key="f_origin")
     with col2:
-        dest_addr = st.text_input("도착지 주소", "부산광역시 동구 중앙대로")
+        dest_addr = st.text_input("도착지 주소", key="f_dest")
 
     col3, col4, col5 = st.columns(3)
     with col3:
-        cargo_type = st.text_input("화물 종류", "전자부품")
+        cargo_type = st.text_input("화물 종류", key="f_cargo")
     with col4:
-        weight_kg = st.number_input("중량(kg)", min_value=0.1, value=8.0)
+        weight_kg = st.number_input("중량(kg)", min_value=0.1, key="f_weight")
     with col5:
         long_side_cm = st.number_input("최장변(cm)", min_value=1.0, value=40.0)
 
-    desired_date = st.date_input("희망 발송일", value=date.today())
+    desired_date = st.date_input("희망 발송일", key="f_date")
     desired_time = st.time_input("희망 출발시각", value=time(9, 0))
     submitted = st.form_submit_button("비교하기")
 
@@ -180,12 +221,14 @@ if submitted:
     pool = get_mock_pool()
     new_order = ShipperOrder("NEW", origin_lat, origin_lng, dest_lat, dest_lng, weight_ton, desired_date)
     consolidation = evaluate_consolidation(new_order, pool)
+    intermodal_result = None
 
     if consolidation.eligible:
         try:
             im = estimate_intermodal(
                 origin_lat, origin_lng, dest_lat, dest_lng, weight_ton, departure_dt
             )
+            intermodal_result = im
             mode_label = "전철화 구간" if im.electrified else "비전철(디젤) 구간"
             schedule_note = (
                 f"실제 시각표 (열차번호 {im.train_no})" if im.schedule_source == "real"
@@ -230,6 +273,25 @@ if submitted:
         st.info(f"철도 통합운송{node_info}: {consolidation.reason}")
 
     st.divider()
+    st.subheader("🗺️ 이동경로")
+    origin_node_tuple = (
+        (intermodal_result.origin_node_lat, intermodal_result.origin_node_lng, intermodal_result.origin_node_name)
+        if intermodal_result else None
+    )
+    dest_node_tuple = (
+        (intermodal_result.dest_node_lat, intermodal_result.dest_node_lng, intermodal_result.dest_node_name)
+        if intermodal_result else None
+    )
+    route_map = build_route_map(
+        origin_lat, origin_lng, dest_lat, dest_lng,
+        origin_node=origin_node_tuple, dest_node=dest_node_tuple,
+    )
+    st.pydeck_chart(route_map)
+    legend_bits = ["🟠 트럭 직송"]
+    if intermodal_result:
+        legend_bits += ["🟢 첫마일/막판마일(트럭)", "🔵 철도 구간"]
+    st.caption(" · ".join(legend_bits))
+
     st.subheader("비교 결과")
 
     if rows:

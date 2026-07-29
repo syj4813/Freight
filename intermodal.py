@@ -30,6 +30,10 @@ class IntermodalResult:
     train_no: str | None
     origin_node_name: str
     dest_node_name: str
+    origin_node_lat: float
+    origin_node_lng: float
+    dest_node_lat: float
+    dest_node_lng: float
     first_mile_km: float
     rail_km: float
     last_mile_km: float
@@ -98,6 +102,10 @@ def estimate_intermodal(
         train_no=rail_leg["train_no"],
         origin_node_name=origin_node.name,
         dest_node_name=dest_node.name,
+        origin_node_lat=origin_node.lat,
+        origin_node_lng=origin_node.lng,
+        dest_node_lat=dest_node.lat,
+        dest_node_lng=dest_node.lng,
         first_mile_km=first_mile["distance_km"],
         rail_km=rail_leg["distance_km"],
         last_mile_km=last_mile["distance_km"],
