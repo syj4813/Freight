@@ -166,6 +166,11 @@ with st.expander("💬 말로 설명하면 자동으로 입력해드립니다", 
 
                 # ── 재질문 로직: 필수 항목(출발지/도착지/중량) 누락 시 안내 ──
                 missing = parsed.get("missing_fields") or []
+                unset_optional = parsed.get("unset_optional_fields") or []
+                OPTIONAL_LABELS = {
+                    "cargo_type": "화물종류", "long_side_cm": "최장변",
+                    "desired_date": "희망 발송일", "desired_time": "희망 출발시각",
+                }
                 if missing:
                     msg = parsed.get("clarification_message") or (
                         "다음 정보를 확인하지 못했습니다: " + ", ".join(missing)
@@ -173,6 +178,9 @@ with st.expander("💬 말로 설명하면 자동으로 입력해드립니다", 
                     st.warning(f"⚠️ {msg} 파악된 내용은 아래 폼에 반영했으니, 나머지를 문장에 추가해서 다시 입력해 주세요.")
                 else:
                     st.success("아래 입력폼에 자동으로 채워넣었습니다. 확인 후 '비교하기'를 눌러주세요.")
+                    if unset_optional:
+                        labels = ", ".join(OPTIONAL_LABELS.get(f, f) for f in unset_optional)
+                        st.info(f"ℹ️ {labels}은(는) 문장에 없어 기본값으로 채워졌습니다 — 폼에서 직접 확인·수정해 주세요.")
 
 with st.form("order_form"):
     col1, col2 = st.columns(2)

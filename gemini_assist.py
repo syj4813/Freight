@@ -38,7 +38,9 @@ def parse_free_text_order(text: str) -> dict:
     필수 항목(출발지/도착지/중량)이 문장에서 파악되지 않으면 'missing_fields'에
     어떤 항목이 빠졌는지, 'clarification_message'에 화주에게 보여줄 안내
     문구를 함께 반환한다 — 화면에서는 이걸로 "다시 입력해 주세요" 재질문
-    로직을 구현한다.
+    로직을 구현한다. 선택 항목(화물종류/최장변/날짜/시각)이 언급되지
+    않았으면 'unset_optional_fields'에 목록으로 담아 반환 — 화면에서는
+    이 항목들이 기본값으로 채워졌다는 걸 화주에게 알려주는 데 쓴다.
     """
     now = now_kst()
     today_str = now.date().isoformat()
@@ -60,6 +62,9 @@ def parse_free_text_order(text: str) -> dict:
   문장에서 파악하지 못한 항목 이름의 리스트. 다 파악됐으면 빈 리스트.
 - clarification_message: missing_fields가 있으면, 화주에게 존댓말로
   무엇을 더 알려달라고 요청하는 짧은 한두 문장. 없으면 null.
+- unset_optional_fields: 선택 항목(cargo_type, long_side_cm, desired_date,
+  desired_time) 중 이번 문장에서 언급되지 않아 값이 null인 항목 이름의
+  리스트. 다 언급됐으면 빈 리스트.
 
 문장: "{text}"
 
