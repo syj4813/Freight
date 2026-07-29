@@ -24,6 +24,11 @@ QUICK_FARE_BASE_WON = 15_000
 QUICK_FARE_PER_KM_WON = 1_200  # 퀵은 근거리 급행이라 km당 단가가 더 높음
 QUICK_MAX_WEIGHT_KG = 30  # 퀵서비스는 대개 소형화물 한정
 
+# 첫마일/막판마일(출발지↔화물역, 화물역↔도착지) 근거리 운송 — 장거리 트럭과
+# 달리 기본료가 낮음(단거리 배차이므로). km당/톤당 단가는 장거리와 동일하게
+# 재사용. ⚠️ 추정치.
+DRAYAGE_BASE_WON = 20_000
+
 
 def get_road_distance_duration(
     origin_lng: float,
@@ -63,4 +68,14 @@ def estimate_quick_fare(distance_km: float, weight_kg: float) -> int | None:
     if weight_kg > QUICK_MAX_WEIGHT_KG:
         return None
     fare = QUICK_FARE_BASE_WON + distance_km * QUICK_FARE_PER_KM_WON
+    return round(fare, -3)
+
+
+def estimate_drayage_fare(distance_km: float, weight_ton: float) -> int:
+    """첫마일/막판마일 근거리 운송 근사 요금 (원). ⚠️ 추정치."""
+    fare = (
+        DRAYAGE_BASE_WON
+        + distance_km * TRUCK_FARE_PER_KM_WON
+        + weight_ton * TRUCK_FARE_PER_TON_WON
+    )
     return round(fare, -3)

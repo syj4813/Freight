@@ -66,3 +66,14 @@ def calculate_truck_vs_rail_savings(distance_km: float, weight_ton: float) -> di
         "diesel_savings": savings(rail_diesel),
         "electric_savings": savings(rail_electric),
     }
+
+
+# 탄소 마일리지 전환 계수 (kg CO2eq 절감당 마일리지 포인트) — ⚠️ 임의 설정치,
+# 대회 시연용. 실제 서비스라면 코레일 마일리지 제도나 탄소포인트제 등 기존
+# 제도와 연동해 전환 비율을 재산정해야 함.
+CARBON_MILEAGE_PER_KG_CO2 = 10
+
+
+def calculate_carbon_mileage(gwp_savings_kg: float) -> int:
+    """탄소 절감량(kgCO2eq)을 화주에게 보여줄 마일리지 포인트로 변환."""
+    return max(0, round(gwp_savings_kg * CARBON_MILEAGE_PER_KG_CO2))

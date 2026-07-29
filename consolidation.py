@@ -18,7 +18,7 @@ DBSCAN 등 밀도 기반 군집화 대신 이 방식을 쓰는 이유:
 from dataclasses import dataclass
 from datetime import date, timedelta
 
-from rail_freight_nodes import CONTAINER_MAX_TON, MIN_CONSOLIDATION_TON
+from rail_freight_nodes import CONTAINER_MAX_TON, MIN_CONSOLIDATION_TON, MIN_SHIPMENT_TON_FOR_RAIL
 from rail_cost import nearest_freight_node
 
 
@@ -49,6 +49,13 @@ def evaluate_consolidation(
     date_window_days: int = 2,
 ) -> ConsolidationResult:
     """새 주문이 (단독으로 또는 풀과 결합해) 철도 이용 가능한지 판정."""
+    if new_order.weight_ton < MIN_SHIPMENT_TON_FOR_RAIL:
+        return ConsolidationResult(
+            False,
+            f"{new_order.weight_ton * 1000:.0f}kg은 소포 단위(최소 {MIN_SHIPMENT_TON_FOR_RAIL * 1000:.0f}kg 미만)"
+            f"라 철도 화물 통합 대상이 아닙니다 — 퀵서비스·KTX특송을 이용하세요.",
+        )
+
     origin_node, _ = nearest_freight_node(new_order.origin_lat, new_order.origin_lng)
     dest_node, _ = nearest_freight_node(new_order.dest_lat, new_order.dest_lng)
 

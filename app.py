@@ -21,13 +21,13 @@ from road_cost import (
     estimate_truck_fare,
     estimate_quick_fare,
 )
-from rail_cost import nearest_freight_node, estimate_rail_leg
 from rail_freight_nodes import CONTAINER_MAX_TON
 from ktx_tucking import check_ktx_tucking_eligible, KTX_TUCKING_STATIONS
 from consolidation import ShipperOrder, evaluate_consolidation
-from emission import calculate_truck_vs_rail_savings, calculate_emission, TransportMode
+from emission import calculate_truck_vs_rail_savings, calculate_carbon_mileage
 from cargo import classify_cargo_type, apply_surcharge, is_mode_restricted, CargoCategory
 from gemini_assist import classify_cargo_category as gemini_classify_cargo
+from intermodal import estimate_intermodal
 
 st.set_page_config(page_title="소량 화물 운송수단 비교", layout="centered")
 
@@ -131,8 +131,6 @@ if submitted:
         st.info(f"퀵서비스: {cargo_category.value} 화물은 취급 제한으로 비교에서 제외")
 
     # ── 3) KTX특송 (규격 충족 시만) ──
-    origin_node, _ = nearest_freight_node(origin_lat, origin_lng)
-    dest_node, _ = nearest_freight_node(dest_lat, dest_lng)
     # ⚠️ 데모 단순화: 실제로는 출발/도착 주소를 KTX특송 취급역으로 매핑하는
     # 로직이 필요합니다 (현재는 임의로 목록의 첫/끝 역을 사용).
     eligible, reason = check_ktx_tucking_eligible(
@@ -149,25 +147,41 @@ if submitted:
     elif eligible:
         st.info(f"KTX특송: {cargo_category.value} 화물은 취급 제한으로 비교에서 제외")
 
-    # ── 4) 철도 통합운송 — 소량 풀 결합 판정 ──
+    # ── 4) 철도 통합운송 — 첫마일(트럭)+철도+막판마일(트럭) door-to-door ──
     pool = get_mock_pool()
     new_order = ShipperOrder("NEW", origin_lat, origin_lng, dest_lat, dest_lng, weight_ton, desired_date)
     consolidation = evaluate_consolidation(new_order, pool)
 
     if consolidation.eligible:
-        rail_leg = estimate_rail_leg(origin_node, dest_node)
-        mode = TransportMode.RAIL_FREIGHT_ELECTRIC if rail_leg["electrified"] else TransportMode.RAIL_FREIGHT_DIESEL
-        rail_emission = calculate_emission(mode, rail_leg["distance_km"], weight_ton)
-        mode_label = "전철화 구간" if rail_leg["electrified"] else "비전철(디젤) 구간"
-        rows.append({
-            "수단": f"철도 통합운송({mode_label})",
-            "소요시간(분)": rail_leg["duration_min"],
-            "요금(원)": apply_surcharge(round(rail_leg["won_per_ton"] * weight_ton), cargo_category),
-            "GWP(kgCO2eq)": rail_emission["gwp_kg_co2e"],
-            "PM(kg)": rail_emission["pm_kg"],
-            "데이터 성격": "요금: 추정치(화물종류 할증 반영) / 전철화 여부: 실제 데이터 기준",
-        })
-        st.success(f"철도 이용 가능: {consolidation.reason}")
+        try:
+            im = estimate_intermodal(origin_lat, origin_lng, dest_lat, dest_lng, weight_ton)
+            mode_label = "전철화 구간" if im.electrified else "비전철(디젤) 구간"
+            rows.append({
+                "수단": f"철도 통합운송({mode_label})",
+                "소요시간(분)": im.total_duration_min,
+                "요금(원)": apply_surcharge(im.total_fare_won, cargo_category),
+                "GWP(kgCO2eq)": im.total_gwp_kg_co2e,
+                "PM(kg)": im.total_pm_kg,
+                "데이터 성격": (
+                    "첫마일/막판마일 트럭 구간 포함 door-to-door 추정치 "
+                    f"({im.first_mile_km}km + 철도 {im.rail_km}km + {im.last_mile_km}km)"
+                ),
+            })
+            st.success(f"철도 이용 가능: {consolidation.reason}")
+
+            # ── 탄소 마일리지 강조 표시 ──
+            if emission_cmp is not None:
+                gwp_savings = emission_cmp["truck"]["gwp_kg_co2e"] - im.total_gwp_kg_co2e
+                mileage = calculate_carbon_mileage(gwp_savings)
+                mcol1, mcol2 = st.columns(2)
+                mcol1.metric("탄소 절감량", f"{gwp_savings:.1f} kgCO2eq", "트럭 대비")
+                mcol2.metric("탄소 마일리지", f"{mileage:,} P", "적립 예상")
+                st.caption(
+                    "※ 탄소 마일리지는 절감된 CO2 1kg당 10P로 환산한 시연용 지표입니다 "
+                    "(실제 서비스 시 별도 제도 연동 및 전환 비율 재산정 필요)."
+                )
+        except Exception as e:
+            st.warning(f"철도 구간 계산 실패: {e} (API 키 확인 필요)")
     else:
         st.info(f"철도 통합운송: {consolidation.reason}")
 
