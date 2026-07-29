@@ -63,13 +63,21 @@ TAGO_API_KEY = st.secrets.get("TAGO_API_KEY", "")
 # ⚠️ 좌표는 앱 기본 데모 주소("서울 중구 세종대로"/"부산 동구 중앙대로")가
 # 매칭되는 화물역(오봉역/부산진역)과 일치하도록 잡았습니다. 실제로는
 # 화물역 좌표 자체와 무관하게 화주 위치 그대로 누적된 값이어야 합니다.
+# 방향성이 있는 실제 물류 특성을 반영해 오봉→부산진, 부산진→오봉 양쪽
+# 방향 샘플을 모두 넣어뒀습니다 (한쪽 방향만 있으면 반대 방향 화주는
+# 항상 결합 실패로 나옵니다).
 @st.cache_data
 def get_mock_pool() -> list[ShipperOrder]:
     today = date.today()
     return [
+        # 오봉역 -> 부산진역 방향
         ShipperOrder("P1", 37.42, 126.90, 35.13, 129.04, 6.0, today + timedelta(days=1)),
         ShipperOrder("P2", 37.43, 126.91, 35.13, 129.04, 5.5, today + timedelta(days=2)),
         ShipperOrder("P3", 37.42, 126.89, 35.13, 129.03, 4.0, today),
+        # 부산진역 -> 오봉역 방향
+        ShipperOrder("P4", 35.13, 129.04, 37.42, 126.90, 6.0, today + timedelta(days=1)),
+        ShipperOrder("P5", 35.13, 129.03, 37.43, 126.91, 5.5, today + timedelta(days=2)),
+        ShipperOrder("P6", 35.12, 129.04, 37.42, 126.89, 4.0, today),
     ]
 
 

@@ -15,6 +15,7 @@ Google Cloud 무료 크레딧을 그대로 소진할 수 있음.
 """
 
 import json
+from datetime import date
 
 from google import genai
 
@@ -30,7 +31,11 @@ def _call_gemini(prompt: str) -> str:
 
 def parse_free_text_order(text: str) -> dict:
     """자연어 입력 -> 구조화된 필드(JSON) 파싱."""
-    prompt = f"""다음 화물 운송 요청 문장에서 정보를 추출해 JSON으로만 답하세요.
+    today_str = date.today().isoformat()
+    prompt = f"""오늘 날짜는 {today_str} 입니다. 다음 화물 운송 요청 문장에서 정보를
+추출해 JSON으로만 답하세요. "내일", "다음주 화요일" 같은 상대적 표현은
+반드시 위 오늘 날짜를 기준으로 실제 날짜(YYYY-MM-DD)로 계산하세요.
+
 필드: origin(출발지), destination(도착지), cargo_type(화물종류),
 weight_kg(중량, 숫자만), desired_date(YYYY-MM-DD, 알 수 없으면 null)
 
