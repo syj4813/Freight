@@ -45,6 +45,30 @@ JSON만 출력하세요. 다른 설명은 붙이지 마세요."""
     return json.loads(cleaned)
 
 
+CARGO_CATEGORIES = ["일반화물", "냉장·냉동", "위험물", "파손주의·고가품", "농산물·생물"]
+
+
+def classify_cargo_category(cargo_type_text: str) -> str:
+    """화물 종류 자연어 입력을 5개 카테고리 중 하나로 분류.
+
+    키워드 매칭(cargo.classify_cargo_type)과 달리 목록에 없는 표현
+    (예: "방사성물질")도 의미 기반으로 처리 가능. 단, LLM 특성상
+    실행마다 결과가 미세하게 달라질 수 있어 재현성은 키워드 방식보다
+    낮음 — 이 트레이드오프를 알고 쓰는 것.
+    """
+    prompt = f"""다음 화물 종류를 아래 카테고리 중 정확히 하나로 분류하세요.
+카테고리: {", ".join(CARGO_CATEGORIES)}
+
+화물 종류: "{cargo_type_text}"
+
+카테고리 이름 하나만 정확히 출력하세요. 다른 설명은 붙이지 마세요."""
+    raw = _call_gemini(prompt).strip()
+    for category in CARGO_CATEGORIES:
+        if category in raw:
+            return category
+    return "일반화물"  # 매칭 실패 시 보수적으로 일반화물 처리
+
+
 def explain_comparison(comparison_rows: list[dict], consolidation_note: str) -> str:
     """계산된 비교 결과를 화주 친화적 문장으로 요약."""
     prompt = f"""아래는 화물 운송 수단별 비교 계산 결과입니다. 화주에게 보여줄

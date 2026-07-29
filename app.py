@@ -26,7 +26,8 @@ from rail_freight_nodes import CONTAINER_MAX_TON
 from ktx_tucking import check_ktx_tucking_eligible, KTX_TUCKING_STATIONS
 from consolidation import ShipperOrder, evaluate_consolidation
 from emission import calculate_truck_vs_rail_savings, calculate_emission, TransportMode
-from cargo import classify_cargo_type, apply_surcharge, is_mode_restricted
+from cargo import classify_cargo_type, apply_surcharge, is_mode_restricted, CargoCategory
+from gemini_assist import classify_cargo_category as gemini_classify_cargo
 
 st.set_page_config(page_title="소량 화물 운송수단 비교", layout="centered")
 
@@ -87,8 +88,13 @@ if submitted:
     dest_lat, dest_lng = dest_coord
     weight_ton = weight_kg / 1000
 
-    cargo_category = classify_cargo_type(cargo_type)
-    st.caption(f"분류된 화물 유형: {cargo_category.value} (입력 기반 자동 분류, 필요 시 문의)")
+    cargo_category = classify_cargo_type(cargo_type)  # 기본값: 키워드 매칭
+    try:
+        cargo_category = CargoCategory(gemini_classify_cargo(cargo_type))
+        classify_source = "Gemini 분류"
+    except Exception:
+        classify_source = "키워드 매칭 (Gemini 호출 실패로 폴백)"
+    st.caption(f"분류된 화물 유형: {cargo_category.value} ({classify_source})")
 
     rows = []
 
