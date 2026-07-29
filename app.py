@@ -26,6 +26,7 @@ from rail_freight_nodes import CONTAINER_MAX_TON
 from ktx_tucking import check_ktx_tucking_eligible, KTX_TUCKING_STATIONS
 from consolidation import ShipperOrder, evaluate_consolidation
 from emission import calculate_truck_vs_rail_savings, calculate_emission, TransportMode
+from cargo import classify_cargo_type, apply_surcharge, is_mode_restricted
 
 st.set_page_config(page_title="소량 화물 운송수단 비교", layout="centered")
 
@@ -86,12 +87,15 @@ if submitted:
     dest_lat, dest_lng = dest_coord
     weight_ton = weight_kg / 1000
 
+    cargo_category = classify_cargo_type(cargo_type)
+    st.caption(f"분류된 화물 유형: {cargo_category.value} (입력 기반 자동 분류, 필요 시 문의)")
+
     rows = []
 
     # ── 1) 트럭 단독 (기준) — 소요시간은 실시간, 요금은 추정치 ──
     try:
         road = get_road_distance_duration(origin_lng, origin_lat, dest_lng, dest_lat)
-        truck_fare = estimate_truck_fare(road["distance_km"], weight_ton)
+        truck_fare = apply_surcharge(estimate_truck_fare(road["distance_km"], weight_ton), cargo_category)
         emission_cmp = calculate_truck_vs_rail_savings(road["distance_km"], weight_ton)
         rows.append({
             "수단": "트럭 단독",
@@ -99,22 +103,24 @@ if submitted:
             "요금(원)": truck_fare,
             "GWP(kgCO2eq)": emission_cmp["truck"]["gwp_kg_co2e"],
             "PM(kg)": emission_cmp["truck"]["pm_kg"],
-            "데이터 성격": "시간: 실시간 / 요금·배출량: 추정치",
+            "데이터 성격": "시간: 실시간 / 요금·배출량: 추정치 (화물종류 할증 반영)",
         })
     except Exception as e:
         st.warning(f"카카오맵 API 호출 실패: {e} (API 키 확인 필요)")
         road = {"distance_km": 0, "duration_min": 0}
         emission_cmp = None
 
-    # ── 2) 퀵서비스 (근거리·소형 한정) ──
+    # ── 2) 퀵서비스 (근거리·소형 한정, 위험물 등은 취급 불가) ──
     quick_fare = estimate_quick_fare(road["distance_km"], weight_kg)
-    if quick_fare is not None:
+    if quick_fare is not None and not is_mode_restricted(cargo_category, "퀵서비스"):
         rows.append({
             "수단": "퀵서비스",
             "소요시간(분)": round(road["duration_min"] * 0.8),  # 급행 가정, 추정
-            "요금(원)": quick_fare,
-            "데이터 성격": "추정치",
+            "요금(원)": apply_surcharge(quick_fare, cargo_category),
+            "데이터 성격": "추정치 (화물종류 할증 반영)",
         })
+    elif quick_fare is not None:
+        st.info(f"퀵서비스: {cargo_category.value} 화물은 취급 제한으로 비교에서 제외")
 
     # ── 3) KTX특송 (규격 충족 시만) ──
     origin_node, _ = nearest_freight_node(origin_lat, origin_lng)
@@ -125,13 +131,15 @@ if submitted:
         KTX_TUCKING_STATIONS[0], KTX_TUCKING_STATIONS[-1],
         long_side_cm, long_side_cm * 2, weight_kg,
     )
-    if eligible:
+    if eligible and not is_mode_restricted(cargo_category, "KTX특송"):
         rows.append({
             "수단": "KTX특송",
             "소요시간(분)": 240,  # 반나절 이내, 추정
             "요금(원)": "짐캐리 공시요금 확인 필요",
             "데이터 성격": "규격: 실제 기준 / 요금: 미확정(TODO)",
         })
+    elif eligible:
+        st.info(f"KTX특송: {cargo_category.value} 화물은 취급 제한으로 비교에서 제외")
 
     # ── 4) 철도 통합운송 — 소량 풀 결합 판정 ──
     pool = get_mock_pool()
@@ -146,10 +154,10 @@ if submitted:
         rows.append({
             "수단": f"철도 통합운송({mode_label})",
             "소요시간(분)": rail_leg["duration_min"],
-            "요금(원)": round(rail_leg["won_per_ton"] * weight_ton),
+            "요금(원)": apply_surcharge(round(rail_leg["won_per_ton"] * weight_ton), cargo_category),
             "GWP(kgCO2eq)": rail_emission["gwp_kg_co2e"],
             "PM(kg)": rail_emission["pm_kg"],
-            "데이터 성격": "요금: 추정치 / 전철화 여부: 화물역 접속 지선 실제 데이터 기준",
+            "데이터 성격": "요금: 추정치(화물종류 할증 반영) / 전철화 여부: 실제 데이터 기준",
         })
         st.success(f"철도 이용 가능: {consolidation.reason}")
     else:
