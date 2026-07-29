@@ -4,9 +4,11 @@ Gemini(Agent Platform express mode) 활용 — 역할을 의도적으로 제한�
 
   - 하지 않는 것: 경로 최적화, 통합 판정, 요금 계산 (전부 결정론적
     로직으로 처리 — 재현성과 설명가능성 확보 목적)
-  - 하는 것: (1) 화주의 자연어 입력을 구조화된 필드로 파싱
+  - 하는 것: (1) 화주의 자연어 입력을 구조화된 필드로 파싱(+ 누락 항목
+             자체 판단 및 재질문 문구 생성)
              (2) 계산된 비교 결과를 화주에게 설명하는 문장 생성
              (3) 화물 종류를 카테고리로 분류
+             (4) 탄소 절감 수치를 체감형 문장으로 설명 (숫자는 코드가 계산)
 
 인증 방식: "Agent Platform Model APIs" 키(AQ.로 시작하는 형식)를
 공식 google-genai SDK의 express mode(`vertexai=True, api_key=...`)로
@@ -15,9 +17,10 @@ Google Cloud 무료 크레딧을 그대로 소진할 수 있음.
 """
 
 import json
-from datetime import date, datetime
 
 from google import genai
+
+from tz_utils import now_kst
 
 GEMINI_API_KEY = ""  # TODO: Streamlit secrets 등으로 주입 (Agent Platform Model APIs 키)
 GEMINI_MODEL = "gemini-3.5-flash"
@@ -30,67 +33,37 @@ def _call_gemini(prompt: str) -> str:
 
 
 def parse_free_text_order(text: str) -> dict:
-    """자연어 입력 -> 구조화된 필드(JSON) 파싱 (단발성, 한 문장 통째로 입력받는 방식)."""
-    today_str = date.today().isoformat()
-    prompt = f"""오늘 날짜는 {today_str} 입니다. 다음 화물 운송 요청 문장에서 정보를
-추출해 JSON으로만 답하세요. "내일", "다음주 화요일" 같은 상대적 표현은
-반드시 위 오늘 날짜를 기준으로 실제 날짜(YYYY-MM-DD)로 계산하세요.
+    """자연어 입력 -> 구조화된 필드(JSON) 파싱 (단발성, 한 문장 통째로 입력받는 방식).
 
-필드: origin(출발지), destination(도착지), cargo_type(화물종류),
-weight_kg(중량, 숫자만), desired_date(YYYY-MM-DD, 알 수 없으면 null)
+    필수 항목(출발지/도착지/중량)이 문장에서 파악되지 않으면 'missing_fields'에
+    어떤 항목이 빠졌는지, 'clarification_message'에 화주에게 보여줄 안내
+    문구를 함께 반환한다 — 화면에서는 이걸로 "다시 입력해 주세요" 재질문
+    로직을 구현한다.
+    """
+    now = now_kst()
+    today_str = now.date().isoformat()
+    now_time_str = now.strftime("%H:%M")
+    prompt = f"""오늘 날짜는 {today_str}, 지금 시각은 {now_time_str}입니다.
+다음 화물 운송 요청 문장에서 정보를 추출해 JSON으로만 답하세요.
+"내일", "다음주 화요일" 같은 상대적 표현은 오늘 날짜 기준으로 실제
+날짜(YYYY-MM-DD)로 계산하고, "최대한 빨리"/"지금 바로" 같은 표현은
+지금 시각을 desired_time으로 사용하세요.
+
+필드:
+- origin(출발지), destination(도착지): 필수. 문장에 없으면 null
+- cargo_type(화물종류): 선택, 없으면 null
+- weight_kg(중량, 숫자만): 필수. 문장에 없으면 null
+- long_side_cm(최장변, 숫자만): 선택, 없으면 null
+- desired_date(YYYY-MM-DD): 선택, 없으면 null
+- desired_time(HH:MM, 24시간제): 선택, 없으면 null
+- missing_fields: 필수 항목(origin, destination, weight_kg) 중 이번
+  문장에서 파악하지 못한 항목 이름의 리스트. 다 파악됐으면 빈 리스트.
+- clarification_message: missing_fields가 있으면, 화주에게 존댓말로
+  무엇을 더 알려달라고 요청하는 짧은 한두 문장. 없으면 null.
 
 문장: "{text}"
 
 JSON만 출력하세요. 다른 설명은 붙이지 마세요."""
-    raw = _call_gemini(prompt)
-    cleaned = raw.strip().removeprefix("```json").removesuffix("```").strip()
-    return json.loads(cleaned)
-
-
-CHAT_SLOT_KEYS = [
-    "origin", "destination", "cargo_type", "weight_kg", "long_side_cm",
-    "desired_date", "desired_time",
-]
-
-
-def chat_fill_slots(conversation_text: str, known: dict) -> dict:
-    """대화형 슬롯 채우기 — 지금까지의 대화와 파악된 정보를 보고,
-    새로 언급된 값을 반영하고 다음 질문(또는 완료 안내)을 생성.
-
-    ⚠️ 매 턴마다 Gemini를 호출하므로 대화가 길어질수록 API 호출 비용이
-    누적됨. 재현성도 일반 파싱보다 낮음(대화형이라 응답이 매번 조금씩
-    다를 수 있음) — 데모 시연 시 감안할 것.
-    """
-    now = datetime.now()
-    today_str = now.date().isoformat()
-    now_time_str = now.strftime("%H:%M")
-    prompt = f"""당신은 화물 운송 견적 조회를 돕는 상담 챗봇입니다.
-오늘 날짜는 {today_str}, 지금 시각은 {now_time_str}입니다. 존댓말을 사용하세요.
-
-현재까지 파악된 정보(JSON): {json.dumps(known, ensure_ascii=False)}
-
-대화 기록:
-{conversation_text}
-
-임무: 대화에서 새로 언급된 정보가 있으면 반영해서 값을 채우세요.
-아직 비어있는 항목(origin, destination, cargo_type, weight_kg, long_side_cm,
-desired_date, desired_time) 중에서 다음 규칙으로 질문하세요:
-- weight_kg와 long_side_cm이 둘 다 비어있다면 이 둘은 반드시 한 번에
-  함께 물어보세요 (예: "화물의 중량(kg)과 크기(최장변, cm)를 알려주세요").
-- 그 외의 항목은 한 번에 하나만 물어보세요.
-- "내일", "다음주 화요일" 같은 상대 날짜는 오늘 날짜 기준으로
-  YYYY-MM-DD로 계산하세요.
-- "최대한 빨리", "지금 바로", "당장" 같은 표현이 desired_time에 대한
-  답으로 나오면 위에 제시된 지금 시각을 desired_time으로 사용하세요.
-- desired_time은 HH:MM(24시간제) 형식으로만 채우세요.
-모든 항목이 채워졌으면 assistant_reply에 "입력하신 내용을 폼에 반영했습니다.
-확인 후 비교하기를 눌러주세요."라고 안내하세요.
-
-다음 JSON 형식으로만 답하세요 (다른 텍스트 절대 금지):
-{{"origin": 값 또는 null, "destination": 값 또는 null, "cargo_type": 값 또는 null,
-"weight_kg": 숫자 또는 null, "long_side_cm": 숫자 또는 null,
-"desired_date": "YYYY-MM-DD" 또는 null, "desired_time": "HH:MM" 또는 null,
-"assistant_reply": "다음 질문 또는 완료 안내 문장"}}"""
     raw = _call_gemini(prompt)
     cleaned = raw.strip().removeprefix("```json").removesuffix("```").strip()
     return json.loads(cleaned)
@@ -128,4 +101,23 @@ def explain_comparison(comparison_rows: list[dict], consolidation_note: str) -> 
 
 비교 데이터: {json.dumps(comparison_rows, ensure_ascii=False)}
 철도 통합운송 판정 메모: {consolidation_note}"""
+    return _call_gemini(prompt)
+
+
+def explain_carbon_savings(gwp_savings_kg: float, mileage: int, tree_equivalent: float) -> str:
+    """탄소 절감 수치를 체감되는 한두 문장으로 풀어서 설명.
+
+    ⚠️ 숫자는 전부 emission.py에서 미리 계산해 인자로 넘겨받는다 —
+    Gemini가 임의로 환산 수치를 만들어내지 않도록, 주어진 숫자를
+    문장으로 표현하는 역할만 맡긴다 (계산은 코드, 설명은 AI 원칙).
+    """
+    prompt = f"""아래 수치를 바탕으로 화주에게 보여줄 탄소 절감 효과를
+한두 문장으로, 친근하고 체감되게 존댓말로 설명하세요. 아래 제시된
+숫자 외의 다른 수치나 비유는 절대 새로 만들어내지 마세요.
+
+- 트럭 대비 절감량: {gwp_savings_kg:.1f} kgCO2eq
+- 적립 예상 탄소 마일리지: {mileage}P
+- 나무 {tree_equivalent}그루의 연간 CO2 흡수량과 비슷함 (참고용 근사 비유)
+
+문장만 출력하세요."""
     return _call_gemini(prompt)

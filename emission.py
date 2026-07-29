@@ -77,3 +77,14 @@ CARBON_MILEAGE_PER_KG_CO2 = 10
 def calculate_carbon_mileage(gwp_savings_kg: float) -> int:
     """탄소 절감량(kgCO2eq)을 화주에게 보여줄 마일리지 포인트로 변환."""
     return max(0, round(gwp_savings_kg * CARBON_MILEAGE_PER_KG_CO2))
+
+
+# 나무 1그루의 연간 CO2 흡수량 — ⚠️ 통상 인용되는 근사치(약 21kg/년)이며
+# 수종·수령에 따라 편차가 큼. 체감형 비유 표시용으로만 사용, 정밀한
+# 환경 지표로 인용하지 말 것.
+TREE_CO2_ABSORPTION_KG_PER_YEAR = 21.0
+
+
+def calculate_tree_equivalent(gwp_savings_kg: float) -> float:
+    """절감된 CO2가 나무 몇 그루의 연간 흡수량과 비슷한지 (근사 비유)."""
+    return round(gwp_savings_kg / TREE_CO2_ABSORPTION_KG_PER_YEAR, 1)

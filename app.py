@@ -11,7 +11,7 @@
      명확히 구분 표시
 """
 
-from datetime import date, datetime, time, timedelta
+from datetime import datetime, time, timedelta
 
 import streamlit as st
 
@@ -24,12 +24,13 @@ from road_cost import (
 from rail_freight_nodes import CONTAINER_MAX_TON
 from ktx_tucking import check_ktx_tucking_eligible, KTX_TUCKING_STATIONS
 from consolidation import ShipperOrder, evaluate_consolidation
-from emission import calculate_truck_vs_rail_savings, calculate_carbon_mileage
+from emission import calculate_truck_vs_rail_savings, calculate_carbon_mileage, calculate_tree_equivalent
 from cargo import classify_cargo_type, apply_surcharge, is_mode_restricted, CargoCategory
 from gemini_assist import classify_cargo_category as gemini_classify_cargo
-from gemini_assist import chat_fill_slots, CHAT_SLOT_KEYS
+from gemini_assist import parse_free_text_order, explain_comparison, explain_carbon_savings
 from intermodal import estimate_intermodal
 from map_view import build_route_map
+from tz_utils import today_kst
 
 st.set_page_config(page_title="소량 화물 운송수단 비교", layout="wide")
 
@@ -69,7 +70,7 @@ TAGO_API_KEY = st.secrets.get("TAGO_API_KEY", "")
 # 특정 노선에만 데이터가 쏠리지 않고 전체 누적 주문을 그대로 씁니다.
 @st.cache_data
 def get_mock_pool() -> list[ShipperOrder]:
-    today = date.today()
+    today = today_kst()
     return [
         # 오봉역 <-> 부산진역
         ShipperOrder("P1", 37.42, 126.90, 35.13, 129.04, 6.0, today + timedelta(days=1)),
@@ -91,107 +92,87 @@ def get_mock_pool() -> list[ShipperOrder]:
 st.title("소량 화물 운송수단 비교")
 st.caption("트럭 · 퀵서비스 · KTX특송 · 철도 통합운송 비교 프로토타입")
 
-# ── 챗봇 자동입력: 인터페이스 사용이 어려운 화주를 위한 자연어 입력 ──
+# ── 자동입력: 인터페이스 사용이 어려운 화주를 위한 자연어 입력 ──
 _defaults = {
     "f_origin": "서울특별시 중구 세종대로",
     "f_dest": "부산광역시 동구 중앙대로",
     "f_cargo": "전자부품",
     "f_weight": 8.0,
     "f_size": 40.0,
-    "f_date": date.today(),
+    "f_date": today_kst(),
     "f_time": time(9, 0),
 }
 for k, v in _defaults.items():
     st.session_state.setdefault(k, v)
 
-SLOT_LABELS = {
-    "origin": "출발지", "destination": "도착지", "cargo_type": "화물종류",
-    "weight_kg": "중량", "long_side_cm": "크기(최장변)",
-    "desired_date": "희망일", "desired_time": "희망 출발시각",
-}
-CHAT_AVATARS = {"assistant": "🚚", "user": "🧑"}
+AUTOFILL_EXAMPLES = [
+    "부산에서 서울로 냉동식품 500kg 내일까지 보내야 해요",
+    "천안에서 순천으로 전자부품 800kg, 최장변 60cm, 모레 오전 10시 출발이요",
+    "포항에서 오봉으로 위험물 2톤 최대한 빨리 보내주세요",
+]
 
-with st.expander("💬 대화로 자동 입력하기 (인터페이스가 어려우신 분께 추천)", expanded=False):
-    if "chat_messages" not in st.session_state:
-        st.session_state.chat_messages = [
-            {"role": "assistant", "content": "안녕하세요! 화물 정보를 대화로 알려주시면 아래 입력폼을 자동으로 채워드릴게요. 출발지가 어디인가요?"}
-        ]
-    if "chat_known" not in st.session_state:
-        st.session_state.chat_known = {k: None for k in CHAT_SLOT_KEYS}
-
-    # ── 진행 체크리스트 ──
-    known = st.session_state.chat_known
-    checklist = " ".join(
-        f"{'✅' if known.get(k) else '⬜'} {SLOT_LABELS[k]}" for k in CHAT_SLOT_KEYS
+with st.expander("💬 말로 설명하면 자동으로 입력해드립니다", expanded=False):
+    st.caption("예시: " + " / ".join(f'"{ex}"' for ex in AUTOFILL_EXAMPLES))
+    free_text = st.text_area(
+        "화물 내용을 문장으로 입력하세요",
+        placeholder=AUTOFILL_EXAMPLES[0],
+        key="free_text_input",
     )
-    st.caption(checklist)
-
-    for msg in st.session_state.chat_messages:
-        with st.chat_message(msg["role"], avatar=CHAT_AVATARS.get(msg["role"])):
-            st.write(msg["content"])
-
-    user_msg = st.chat_input("메시지를 입력하세요")
-    if user_msg:
-        st.session_state.chat_messages.append({"role": "user", "content": user_msg})
-        with st.chat_message("user", avatar=CHAT_AVATARS["user"]):
-            st.write(user_msg)
-
-        conversation_text = "\n".join(
-            f"{m['role']}: {m['content']}" for m in st.session_state.chat_messages
-        )
-        with st.chat_message("assistant", avatar=CHAT_AVATARS["assistant"]):
-            with st.spinner("생각하는 중..."):
+    if st.button("자동 입력"):
+        if not free_text.strip():
+            st.warning("먼저 화물 내용을 문장으로 입력해 주세요.")
+        else:
+            with st.spinner("입력 내용을 분석하는 중..."):
                 try:
-                    result = chat_fill_slots(conversation_text, st.session_state.chat_known)
-                    for k in CHAT_SLOT_KEYS:
-                        if result.get(k) not in (None, ""):
-                            st.session_state.chat_known[k] = result[k]
-                    reply = result.get("assistant_reply", "죄송합니다, 다시 한 번 말씀해 주시겠어요?")
+                    parsed = parse_free_text_order(free_text)
                 except Exception as e:
-                    reply = f"처리 중 오류가 발생했습니다: {e}"
-            st.write(reply)
-        st.session_state.chat_messages.append({"role": "assistant", "content": reply})
+                    parsed = None
+                    st.error(f"입력을 이해하지 못했습니다 ({e}). 예시를 참고해서 다시 입력해 주세요.")
 
-        # 파악된 값을 폼에 실시간 반영 (출발지/도착지는 정확한 주소로 정규화)
-        known = st.session_state.chat_known
-        if known.get("origin"):
-            try:
-                resolved = geocode_to_formatted_address(known["origin"])
-            except Exception:
-                resolved = None
-            st.session_state["f_origin"] = resolved or known["origin"]
-        if known.get("destination"):
-            try:
-                resolved = geocode_to_formatted_address(known["destination"])
-            except Exception:
-                resolved = None
-            st.session_state["f_dest"] = resolved or known["destination"]
-        if known.get("cargo_type"):
-            st.session_state["f_cargo"] = known["cargo_type"]
-        if known.get("weight_kg"):
-            st.session_state["f_weight"] = float(known["weight_kg"])
-        if known.get("long_side_cm"):
-            st.session_state["f_size"] = float(known["long_side_cm"])
-        if known.get("desired_date"):
-            try:
-                st.session_state["f_date"] = datetime.strptime(
-                    known["desired_date"], "%Y-%m-%d"
-                ).date()
-            except ValueError:
-                pass
-        if known.get("desired_time"):
-            try:
-                st.session_state["f_time"] = datetime.strptime(
-                    known["desired_time"], "%H:%M"
-                ).time()
-            except ValueError:
-                pass
-        st.rerun()
+            if parsed is not None:
+                # 파악된 항목은 즉시 폼에 반영 (출발지/도착지는 정확한 주소로 정규화)
+                if parsed.get("origin"):
+                    try:
+                        resolved = geocode_to_formatted_address(parsed["origin"])
+                    except Exception:
+                        resolved = None
+                    st.session_state["f_origin"] = resolved or parsed["origin"]
+                if parsed.get("destination"):
+                    try:
+                        resolved = geocode_to_formatted_address(parsed["destination"])
+                    except Exception:
+                        resolved = None
+                    st.session_state["f_dest"] = resolved or parsed["destination"]
+                if parsed.get("cargo_type"):
+                    st.session_state["f_cargo"] = parsed["cargo_type"]
+                if parsed.get("weight_kg"):
+                    st.session_state["f_weight"] = float(parsed["weight_kg"])
+                if parsed.get("long_side_cm"):
+                    st.session_state["f_size"] = float(parsed["long_side_cm"])
+                if parsed.get("desired_date"):
+                    try:
+                        st.session_state["f_date"] = datetime.strptime(
+                            parsed["desired_date"], "%Y-%m-%d"
+                        ).date()
+                    except ValueError:
+                        pass
+                if parsed.get("desired_time"):
+                    try:
+                        st.session_state["f_time"] = datetime.strptime(
+                            parsed["desired_time"], "%H:%M"
+                        ).time()
+                    except ValueError:
+                        pass
 
-    if st.button("대화 초기화", key="chat_reset"):
-        del st.session_state["chat_messages"]
-        del st.session_state["chat_known"]
-        st.rerun()
+                # ── 재질문 로직: 필수 항목(출발지/도착지/중량) 누락 시 안내 ──
+                missing = parsed.get("missing_fields") or []
+                if missing:
+                    msg = parsed.get("clarification_message") or (
+                        "다음 정보를 확인하지 못했습니다: " + ", ".join(missing)
+                    )
+                    st.warning(f"⚠️ {msg} 파악된 내용은 아래 폼에 반영했으니, 나머지를 문장에 추가해서 다시 입력해 주세요.")
+                else:
+                    st.success("아래 입력폼에 자동으로 채워넣었습니다. 확인 후 '비교하기'를 눌러주세요.")
 
 with st.form("order_form"):
     col1, col2 = st.columns(2)
@@ -333,11 +314,18 @@ if submitted:
             if emission_cmp is not None:
                 gwp_savings = emission_cmp["truck"]["gwp_kg_co2e"] - im.total_gwp_kg_co2e
                 mileage = calculate_carbon_mileage(gwp_savings)
+                tree_equivalent = calculate_tree_equivalent(gwp_savings)
                 mcol1, mcol2 = st.columns(2)
                 mcol1.metric("탄소 절감량", f"{gwp_savings:.1f} kgCO2eq", "트럭 대비")
                 mcol2.metric("탄소 마일리지", f"{mileage:,} P", "적립 예상")
+                try:
+                    narrative = explain_carbon_savings(gwp_savings, mileage, tree_equivalent)
+                    st.info(f"🌱 {narrative}")
+                except Exception:
+                    st.info(f"🌱 나무 약 {tree_equivalent}그루의 연간 CO2 흡수량과 비슷한 양을 절감했습니다.")
                 st.caption(
-                    "※ 탄소 마일리지는 절감된 CO2 1kg당 10P로 환산한 시연용 지표입니다 "
+                    "※ 탄소 마일리지는 절감된 CO2 1kg당 10P로 환산한 시연용 지표이며, "
+                    "나무 환산은 통상 인용되는 근사치(1그루당 연 21kg 흡수 가정)입니다 "
                     "(실제 서비스 시 별도 제도 연동 및 전환 비율 재산정 필요)."
                 )
         except Exception as e:
@@ -421,6 +409,16 @@ if submitted:
             with chart_col2:
                 st.caption("소요시간 비교 (분)")
                 st.bar_chart({r["수단"]: r["소요시간(분)"] for r in rows})
+
+        # ── AI 요약 추천 ──
+        st.write("")
+        with st.container(border=True):
+            st.markdown("#### 🤖 AI 요약")
+            try:
+                summary = explain_comparison(rows, consolidation.reason)
+                st.write(summary)
+            except Exception as e:
+                st.caption(f"AI 요약을 생성하지 못했습니다 ({e}). 위 비교표를 참고해 주세요.")
 
         with st.expander("상세 데이터 표로 보기"):
             st.table(rows)
