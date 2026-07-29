@@ -92,8 +92,10 @@ if submitted:
     try:
         cargo_category = CargoCategory(gemini_classify_cargo(cargo_type))
         classify_source = "Gemini 분류"
-    except Exception:
+    except Exception as e:
         classify_source = "키워드 매칭 (Gemini 호출 실패로 폴백)"
+        with st.expander("Gemini 호출 실패 상세 (디버그용)"):
+            st.code(f"{type(e).__name__}: {e}")
     st.caption(f"분류된 화물 유형: {cargo_category.value} ({classify_source})")
 
     rows = []

@@ -13,7 +13,7 @@ import json
 import requests
 
 GEMINI_API_KEY = ""  # TODO: Streamlit secrets 등으로 주입
-GEMINI_MODEL = "gemini-2.0-flash"
+GEMINI_MODEL = "gemini-3.5-flash"
 GEMINI_URL = (
     f"https://generativelanguage.googleapis.com/v1beta/models/"
     f"{GEMINI_MODEL}:generateContent"
@@ -22,7 +22,11 @@ GEMINI_URL = (
 
 def _call_gemini(prompt: str) -> str:
     resp = requests.post(
-        f"{GEMINI_URL}?key={GEMINI_API_KEY}",
+        GEMINI_URL,
+        headers={
+            "Content-Type": "application/json",
+            "x-goog-api-key": GEMINI_API_KEY,
+        },
         json={"contents": [{"parts": [{"text": prompt}]}]},
         timeout=15,
     )
