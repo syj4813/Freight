@@ -44,13 +44,16 @@ TAGO_API_KEY = st.secrets.get("TAGO_API_KEY", "")
 
 
 # ── 데모용 가상 화주 풀 (실제 서비스라면 누적 주문 DB) ───────────
+# ⚠️ 좌표는 앱 기본 데모 주소("서울 중구 세종대로"/"부산 동구 중앙대로")가
+# 매칭되는 화물역(오봉역/부산진역)과 일치하도록 잡았습니다. 실제로는
+# 화물역 좌표 자체와 무관하게 화주 위치 그대로 누적된 값이어야 합니다.
 @st.cache_data
 def get_mock_pool() -> list[ShipperOrder]:
     today = date.today()
     return [
-        ShipperOrder("P1", 37.3308, 126.9683, 35.0762, 128.8095, 6.0, today + timedelta(days=1)),
-        ShipperOrder("P2", 37.35, 126.95, 35.08, 128.80, 5.5, today + timedelta(days=2)),
-        ShipperOrder("P3", 37.30, 126.97, 35.07, 128.82, 4.0, today),
+        ShipperOrder("P1", 37.42, 126.90, 35.13, 129.04, 6.0, today + timedelta(days=1)),
+        ShipperOrder("P2", 37.43, 126.91, 35.13, 129.04, 5.5, today + timedelta(days=2)),
+        ShipperOrder("P3", 37.42, 126.89, 35.13, 129.03, 4.0, today),
     ]
 
 
@@ -167,7 +170,10 @@ if submitted:
                     f"({im.first_mile_km}km + 철도 {im.rail_km}km + {im.last_mile_km}km)"
                 ),
             })
-            st.success(f"철도 이용 가능: {consolidation.reason}")
+            st.success(
+                f"철도 이용 가능 ({consolidation.origin_node_name} → "
+                f"{consolidation.dest_node_name}): {consolidation.reason}"
+            )
 
             # ── 탄소 마일리지 강조 표시 ──
             if emission_cmp is not None:
@@ -183,7 +189,12 @@ if submitted:
         except Exception as e:
             st.warning(f"철도 구간 계산 실패: {e} (API 키 확인 필요)")
     else:
-        st.info(f"철도 통합운송: {consolidation.reason}")
+        node_info = (
+            f" ({consolidation.origin_node_name} → {consolidation.dest_node_name})"
+            if consolidation.origin_node_name
+            else ""
+        )
+        st.info(f"철도 통합운송{node_info}: {consolidation.reason}")
 
     st.subheader("비교 결과")
     st.table(rows)
