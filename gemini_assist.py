@@ -15,7 +15,7 @@ Google Cloud 무료 크레딧을 그대로 소진할 수 있음.
 """
 
 import json
-from datetime import date
+from datetime import date, datetime
 
 from google import genai
 
@@ -47,7 +47,10 @@ JSON만 출력하세요. 다른 설명은 붙이지 마세요."""
     return json.loads(cleaned)
 
 
-CHAT_SLOT_KEYS = ["origin", "destination", "cargo_type", "weight_kg", "desired_date"]
+CHAT_SLOT_KEYS = [
+    "origin", "destination", "cargo_type", "weight_kg", "long_side_cm",
+    "desired_date", "desired_time",
+]
 
 
 def chat_fill_slots(conversation_text: str, known: dict) -> dict:
@@ -58,9 +61,11 @@ def chat_fill_slots(conversation_text: str, known: dict) -> dict:
     누적됨. 재현성도 일반 파싱보다 낮음(대화형이라 응답이 매번 조금씩
     다를 수 있음) — 데모 시연 시 감안할 것.
     """
-    today_str = date.today().isoformat()
+    now = datetime.now()
+    today_str = now.date().isoformat()
+    now_time_str = now.strftime("%H:%M")
     prompt = f"""당신은 화물 운송 견적 조회를 돕는 상담 챗봇입니다.
-오늘 날짜는 {today_str}입니다. 존댓말을 사용하세요.
+오늘 날짜는 {today_str}, 지금 시각은 {now_time_str}입니다. 존댓말을 사용하세요.
 
 현재까지 파악된 정보(JSON): {json.dumps(known, ensure_ascii=False)}
 
@@ -68,15 +73,23 @@ def chat_fill_slots(conversation_text: str, known: dict) -> dict:
 {conversation_text}
 
 임무: 대화에서 새로 언급된 정보가 있으면 반영해서 값을 채우세요.
-아직 비어있는 항목(origin, destination, cargo_type, weight_kg, desired_date)
-중 하나만 골라 짧고 자연스러운 질문을 하세요(한 번에 여러 개 묻지 마세요).
-"내일", "다음주" 같은 상대 날짜는 오늘 날짜 기준으로 YYYY-MM-DD로 계산하세요.
+아직 비어있는 항목(origin, destination, cargo_type, weight_kg, long_side_cm,
+desired_date, desired_time) 중에서 다음 규칙으로 질문하세요:
+- weight_kg와 long_side_cm이 둘 다 비어있다면 이 둘은 반드시 한 번에
+  함께 물어보세요 (예: "화물의 중량(kg)과 크기(최장변, cm)를 알려주세요").
+- 그 외의 항목은 한 번에 하나만 물어보세요.
+- "내일", "다음주 화요일" 같은 상대 날짜는 오늘 날짜 기준으로
+  YYYY-MM-DD로 계산하세요.
+- "최대한 빨리", "지금 바로", "당장" 같은 표현이 desired_time에 대한
+  답으로 나오면 위에 제시된 지금 시각을 desired_time으로 사용하세요.
+- desired_time은 HH:MM(24시간제) 형식으로만 채우세요.
 모든 항목이 채워졌으면 assistant_reply에 "입력하신 내용을 폼에 반영했습니다.
 확인 후 비교하기를 눌러주세요."라고 안내하세요.
 
 다음 JSON 형식으로만 답하세요 (다른 텍스트 절대 금지):
 {{"origin": 값 또는 null, "destination": 값 또는 null, "cargo_type": 값 또는 null,
-"weight_kg": 숫자 또는 null, "desired_date": "YYYY-MM-DD" 또는 null,
+"weight_kg": 숫자 또는 null, "long_side_cm": 숫자 또는 null,
+"desired_date": "YYYY-MM-DD" 또는 null, "desired_time": "HH:MM" 또는 null,
 "assistant_reply": "다음 질문 또는 완료 안내 문장"}}"""
     raw = _call_gemini(prompt)
     cleaned = raw.strip().removeprefix("```json").removesuffix("```").strip()

@@ -15,7 +15,7 @@ from datetime import date, datetime, time, timedelta
 
 import streamlit as st
 
-from geocode import geocode_address
+from geocode import geocode_address, geocode_to_formatted_address
 from road_cost import (
     get_road_distance_duration,
     estimate_truck_fare,
@@ -63,21 +63,28 @@ TAGO_API_KEY = st.secrets.get("TAGO_API_KEY", "")
 # ⚠️ 좌표는 앱 기본 데모 주소("서울 중구 세종대로"/"부산 동구 중앙대로")가
 # 매칭되는 화물역(오봉역/부산진역)과 일치하도록 잡았습니다. 실제로는
 # 화물역 좌표 자체와 무관하게 화주 위치 그대로 누적된 값이어야 합니다.
-# 방향성이 있는 실제 물류 특성을 반영해 오봉→부산진, 부산진→오봉 양쪽
-# 방향 샘플을 모두 넣어뒀습니다 (한쪽 방향만 있으면 반대 방향 화주는
-# 항상 결합 실패로 나옵니다).
+# 방향성이 있는 실제 물류 특성을 반영해 각 노선 쌍을 양방향으로 넣었고,
+# 챗봇으로 다양한 주소를 테스트할 때 결과가 항상 "결합 불가"만 나오지
+# 않도록 대표 노선 몇 개를 추가로 넣어뒀습니다. 실제 서비스에서는
+# 특정 노선에만 데이터가 쏠리지 않고 전체 누적 주문을 그대로 씁니다.
 @st.cache_data
 def get_mock_pool() -> list[ShipperOrder]:
     today = date.today()
     return [
-        # 오봉역 -> 부산진역 방향
+        # 오봉역 <-> 부산진역
         ShipperOrder("P1", 37.42, 126.90, 35.13, 129.04, 6.0, today + timedelta(days=1)),
         ShipperOrder("P2", 37.43, 126.91, 35.13, 129.04, 5.5, today + timedelta(days=2)),
         ShipperOrder("P3", 37.42, 126.89, 35.13, 129.03, 4.0, today),
-        # 부산진역 -> 오봉역 방향
         ShipperOrder("P4", 35.13, 129.04, 37.42, 126.90, 6.0, today + timedelta(days=1)),
         ShipperOrder("P5", 35.13, 129.03, 37.43, 126.91, 5.5, today + timedelta(days=2)),
         ShipperOrder("P6", 35.12, 129.04, 37.42, 126.89, 4.0, today),
+        # 오봉역 <-> 순천역
+        ShipperOrder("P7", 37.42, 126.90, 34.95, 127.49, 5.0, today + timedelta(days=1)),
+        ShipperOrder("P8", 37.43, 126.91, 34.95, 127.48, 4.5, today),
+        ShipperOrder("P9", 34.95, 127.49, 37.43, 126.91, 5.5, today + timedelta(days=1)),
+        # 오봉역 <-> 포항역
+        ShipperOrder("P10", 37.42, 126.90, 36.07, 129.37, 5.0, today + timedelta(days=1)),
+        ShipperOrder("P11", 36.06, 129.37, 37.43, 126.91, 5.5, today),
     ]
 
 
@@ -90,14 +97,17 @@ _defaults = {
     "f_dest": "부산광역시 동구 중앙대로",
     "f_cargo": "전자부품",
     "f_weight": 8.0,
+    "f_size": 40.0,
     "f_date": date.today(),
+    "f_time": time(9, 0),
 }
 for k, v in _defaults.items():
     st.session_state.setdefault(k, v)
 
 SLOT_LABELS = {
     "origin": "출발지", "destination": "도착지", "cargo_type": "화물종류",
-    "weight_kg": "중량", "desired_date": "희망일",
+    "weight_kg": "중량", "long_side_cm": "크기(최장변)",
+    "desired_date": "희망일", "desired_time": "희망 출발시각",
 }
 CHAT_AVATARS = {"assistant": "🚚", "user": "🧑"}
 
@@ -142,21 +152,38 @@ with st.expander("💬 대화로 자동 입력하기 (인터페이스가 어려�
             st.write(reply)
         st.session_state.chat_messages.append({"role": "assistant", "content": reply})
 
-        # 파악된 값을 폼에 실시간 반영
+        # 파악된 값을 폼에 실시간 반영 (출발지/도착지는 정확한 주소로 정규화)
         known = st.session_state.chat_known
         if known.get("origin"):
-            st.session_state["f_origin"] = known["origin"]
+            try:
+                resolved = geocode_to_formatted_address(known["origin"])
+            except Exception:
+                resolved = None
+            st.session_state["f_origin"] = resolved or known["origin"]
         if known.get("destination"):
-            st.session_state["f_dest"] = known["destination"]
+            try:
+                resolved = geocode_to_formatted_address(known["destination"])
+            except Exception:
+                resolved = None
+            st.session_state["f_dest"] = resolved or known["destination"]
         if known.get("cargo_type"):
             st.session_state["f_cargo"] = known["cargo_type"]
         if known.get("weight_kg"):
             st.session_state["f_weight"] = float(known["weight_kg"])
+        if known.get("long_side_cm"):
+            st.session_state["f_size"] = float(known["long_side_cm"])
         if known.get("desired_date"):
             try:
                 st.session_state["f_date"] = datetime.strptime(
                     known["desired_date"], "%Y-%m-%d"
                 ).date()
+            except ValueError:
+                pass
+        if known.get("desired_time"):
+            try:
+                st.session_state["f_time"] = datetime.strptime(
+                    known["desired_time"], "%H:%M"
+                ).time()
             except ValueError:
                 pass
         st.rerun()
@@ -179,10 +206,10 @@ with st.form("order_form"):
     with col4:
         weight_kg = st.number_input("중량(kg)", min_value=0.1, key="f_weight")
     with col5:
-        long_side_cm = st.number_input("최장변(cm)", min_value=1.0, value=40.0)
+        long_side_cm = st.number_input("최장변(cm)", min_value=1.0, key="f_size")
 
     desired_date = st.date_input("희망 발송일", key="f_date")
-    desired_time = st.time_input("희망 출발시각", value=time(9, 0))
+    desired_time = st.time_input("희망 출발시각", key="f_time")
     submitted = st.form_submit_button("비교하기")
 
 if submitted:
