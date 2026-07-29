@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
-CSV_PATH = Path(__file__).parent / "data" / "freight_train_schedule.csv"
+CSV_PATH = Path(__file__).parent / "freight_train_schedule.csv"
 
 # Python date.weekday(): 0=월요일 ... 6=일요일
 _WEEKDAY_CHARS = ["월", "화", "수", "목", "금", "토", "일"]

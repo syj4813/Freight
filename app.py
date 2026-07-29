@@ -27,7 +27,7 @@ from consolidation import ShipperOrder, evaluate_consolidation
 from emission import calculate_truck_vs_rail_savings, calculate_carbon_mileage
 from cargo import classify_cargo_type, apply_surcharge, is_mode_restricted, CargoCategory
 from gemini_assist import classify_cargo_category as gemini_classify_cargo
-from gemini_assist import parse_free_text_order
+from gemini_assist import chat_fill_slots, CHAT_SLOT_KEYS
 from intermodal import estimate_intermodal
 from map_view import build_route_map
 
@@ -95,33 +95,59 @@ _defaults = {
 for k, v in _defaults.items():
     st.session_state.setdefault(k, v)
 
-with st.expander("💬 말로 설명하면 자동으로 입력해드립니다", expanded=False):
-    free_text = st.text_area(
-        "예: \"부산에서 서울로 냉동식품 500kg 다음 주 화요일까지 보내야 해요\"",
-        key="free_text_input",
-    )
-    if st.button("자동 입력"):
-        if not free_text.strip():
-            st.warning("먼저 화물 내용을 문장으로 입력해 주세요.")
-        else:
-            with st.spinner("입력 내용을 분석하는 중..."):
+with st.expander("💬 대화로 자동 입력하기 (인터페이스가 어려우신 분께 추천)", expanded=False):
+    if "chat_messages" not in st.session_state:
+        st.session_state.chat_messages = [
+            {"role": "assistant", "content": "안녕하세요! 화물 정보를 대화로 알려주시면 아래 입력폼을 자동으로 채워드릴게요. 출발지가 어디인가요?"}
+        ]
+    if "chat_known" not in st.session_state:
+        st.session_state.chat_known = {k: None for k in CHAT_SLOT_KEYS}
+
+    for msg in st.session_state.chat_messages:
+        with st.chat_message(msg["role"]):
+            st.write(msg["content"])
+
+    user_msg = st.chat_input("메시지를 입력하세요")
+    if user_msg:
+        st.session_state.chat_messages.append({"role": "user", "content": user_msg})
+        conversation_text = "\n".join(
+            f"{m['role']}: {m['content']}" for m in st.session_state.chat_messages
+        )
+        try:
+            result = chat_fill_slots(conversation_text, st.session_state.chat_known)
+            for k in CHAT_SLOT_KEYS:
+                if result.get(k) not in (None, ""):
+                    st.session_state.chat_known[k] = result[k]
+            reply = result.get("assistant_reply", "죄송합니다, 다시 한 번 말씀해 주시겠어요?")
+            st.session_state.chat_messages.append({"role": "assistant", "content": reply})
+
+            # 파악된 값을 폼에 실시간 반영
+            known = st.session_state.chat_known
+            if known.get("origin"):
+                st.session_state["f_origin"] = known["origin"]
+            if known.get("destination"):
+                st.session_state["f_dest"] = known["destination"]
+            if known.get("cargo_type"):
+                st.session_state["f_cargo"] = known["cargo_type"]
+            if known.get("weight_kg"):
+                st.session_state["f_weight"] = float(known["weight_kg"])
+            if known.get("desired_date"):
                 try:
-                    parsed = parse_free_text_order(free_text)
-                    if parsed.get("origin"):
-                        st.session_state["f_origin"] = parsed["origin"]
-                    if parsed.get("destination"):
-                        st.session_state["f_dest"] = parsed["destination"]
-                    if parsed.get("cargo_type"):
-                        st.session_state["f_cargo"] = parsed["cargo_type"]
-                    if parsed.get("weight_kg"):
-                        st.session_state["f_weight"] = float(parsed["weight_kg"])
-                    if parsed.get("desired_date"):
-                        st.session_state["f_date"] = datetime.strptime(
-                            parsed["desired_date"], "%Y-%m-%d"
-                        ).date()
-                    st.success("아래 입력폼에 자동으로 채워넣었습니다. 확인 후 '비교하기'를 눌러주세요.")
-                except Exception as e:
-                    st.error(f"자동 입력 실패: {e}. 아래 폼에 직접 입력해 주세요.")
+                    st.session_state["f_date"] = datetime.strptime(
+                        known["desired_date"], "%Y-%m-%d"
+                    ).date()
+                except ValueError:
+                    pass
+        except Exception as e:
+            st.session_state.chat_messages.append(
+                {"role": "assistant", "content": f"처리 중 오류가 발생했습니다: {e}"}
+            )
+        st.rerun()
+
+    if st.button("대화 초기화", key="chat_reset"):
+        del st.session_state["chat_messages"]
+        del st.session_state["chat_known"]
+        st.rerun()
 
 with st.form("order_form"):
     col1, col2 = st.columns(2)

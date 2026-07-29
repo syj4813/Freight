@@ -30,7 +30,7 @@ def _call_gemini(prompt: str) -> str:
 
 
 def parse_free_text_order(text: str) -> dict:
-    """자연어 입력 -> 구조화된 필드(JSON) 파싱."""
+    """자연어 입력 -> 구조화된 필드(JSON) 파싱 (단발성, 한 문장 통째로 입력받는 방식)."""
     today_str = date.today().isoformat()
     prompt = f"""오늘 날짜는 {today_str} 입니다. 다음 화물 운송 요청 문장에서 정보를
 추출해 JSON으로만 답하세요. "내일", "다음주 화요일" 같은 상대적 표현은
@@ -42,6 +42,42 @@ weight_kg(중량, 숫자만), desired_date(YYYY-MM-DD, 알 수 없으면 null)
 문장: "{text}"
 
 JSON만 출력하세요. 다른 설명은 붙이지 마세요."""
+    raw = _call_gemini(prompt)
+    cleaned = raw.strip().removeprefix("```json").removesuffix("```").strip()
+    return json.loads(cleaned)
+
+
+CHAT_SLOT_KEYS = ["origin", "destination", "cargo_type", "weight_kg", "desired_date"]
+
+
+def chat_fill_slots(conversation_text: str, known: dict) -> dict:
+    """대화형 슬롯 채우기 — 지금까지의 대화와 파악된 정보를 보고,
+    새로 언급된 값을 반영하고 다음 질문(또는 완료 안내)을 생성.
+
+    ⚠️ 매 턴마다 Gemini를 호출하므로 대화가 길어질수록 API 호출 비용이
+    누적됨. 재현성도 일반 파싱보다 낮음(대화형이라 응답이 매번 조금씩
+    다를 수 있음) — 데모 시연 시 감안할 것.
+    """
+    today_str = date.today().isoformat()
+    prompt = f"""당신은 화물 운송 견적 조회를 돕는 상담 챗봇입니다.
+오늘 날짜는 {today_str}입니다. 존댓말을 사용하세요.
+
+현재까지 파악된 정보(JSON): {json.dumps(known, ensure_ascii=False)}
+
+대화 기록:
+{conversation_text}
+
+임무: 대화에서 새로 언급된 정보가 있으면 반영해서 값을 채우세요.
+아직 비어있는 항목(origin, destination, cargo_type, weight_kg, desired_date)
+중 하나만 골라 짧고 자연스러운 질문을 하세요(한 번에 여러 개 묻지 마세요).
+"내일", "다음주" 같은 상대 날짜는 오늘 날짜 기준으로 YYYY-MM-DD로 계산하세요.
+모든 항목이 채워졌으면 assistant_reply에 "입력하신 내용을 폼에 반영했습니다.
+확인 후 비교하기를 눌러주세요."라고 안내하세요.
+
+다음 JSON 형식으로만 답하세요 (다른 텍스트 절대 금지):
+{{"origin": 값 또는 null, "destination": 값 또는 null, "cargo_type": 값 또는 null,
+"weight_kg": 숫자 또는 null, "desired_date": "YYYY-MM-DD" 또는 null,
+"assistant_reply": "다음 질문 또는 완료 안내 문장"}}"""
     raw = _call_gemini(prompt)
     cleaned = raw.strip().removeprefix("```json").removesuffix("```").strip()
     return json.loads(cleaned)
