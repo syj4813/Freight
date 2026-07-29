@@ -36,7 +36,12 @@ def get_road_distance_duration(
     dest_lng: float,
     dest_lat: float,
 ) -> dict:
-    """카카오 모빌리티 API로 실제 도로 거리(m)/시간(초) 조회."""
+    """카카오 모빌리티 API로 실제 도로 거리(m)/시간(초)/경로 좌표 조회.
+
+    'path'는 지도에 실제 도로를 따라 그리기 위한 [(lat, lng), ...] 목록.
+    API 응답의 sections[].roads[].vertexes는 [lng, lat, lng, lat, ...]
+    형태로 평탄화돼 있어, 2개씩 끊어서 (lat, lng) 튜플로 변환한다.
+    """
     url = "https://apis-navi.kakaomobility.com/v1/directions"
     headers = {"Authorization": f"KakaoAK {KAKAO_REST_API_KEY}"}
     params = {
@@ -46,10 +51,24 @@ def get_road_distance_duration(
     resp = requests.get(url, headers=headers, params=params, timeout=5)
     resp.raise_for_status()
     data = resp.json()
-    route = data["routes"][0]["summary"]
+    route = data["routes"][0]
+    summary = route["summary"]
+
+    path: list[tuple[float, float]] = []
+    for section in route.get("sections", []):
+        for road in section.get("roads", []):
+            vertexes = road.get("vertexes", [])
+            for i in range(0, len(vertexes) - 1, 2):
+                lng, lat = vertexes[i], vertexes[i + 1]
+                path.append((lat, lng))
+    if not path:
+        # 폴백: 도로 구간 정보가 없으면 최소한 시작/끝 직선이라도 제공
+        path = [(origin_lat, origin_lng), (dest_lat, dest_lng)]
+
     return {
-        "distance_km": route["distance"] / 1000,
-        "duration_min": route["duration"] / 60,
+        "distance_km": summary["distance"] / 1000,
+        "duration_min": summary["duration"] / 60,
+        "path": path,
     }
 
 

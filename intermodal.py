@@ -37,6 +37,8 @@ class IntermodalResult:
     first_mile_km: float
     rail_km: float
     last_mile_km: float
+    first_mile_path: list[tuple[float, float]]
+    last_mile_path: list[tuple[float, float]]
 
 
 def estimate_intermodal(
@@ -109,4 +111,6 @@ def estimate_intermodal(
         first_mile_km=first_mile["distance_km"],
         rail_km=rail_leg["distance_km"],
         last_mile_km=last_mile["distance_km"],
+        first_mile_path=first_mile["path"],
+        last_mile_path=last_mile["path"],
     )

@@ -95,6 +95,12 @@ _defaults = {
 for k, v in _defaults.items():
     st.session_state.setdefault(k, v)
 
+SLOT_LABELS = {
+    "origin": "출발지", "destination": "도착지", "cargo_type": "화물종류",
+    "weight_kg": "중량", "desired_date": "희망일",
+}
+CHAT_AVATARS = {"assistant": "🚚", "user": "🧑"}
+
 with st.expander("💬 대화로 자동 입력하기 (인터페이스가 어려우신 분께 추천)", expanded=False):
     if "chat_messages" not in st.session_state:
         st.session_state.chat_messages = [
@@ -103,45 +109,56 @@ with st.expander("💬 대화로 자동 입력하기 (인터페이스가 어려�
     if "chat_known" not in st.session_state:
         st.session_state.chat_known = {k: None for k in CHAT_SLOT_KEYS}
 
+    # ── 진행 체크리스트 ──
+    known = st.session_state.chat_known
+    checklist = " ".join(
+        f"{'✅' if known.get(k) else '⬜'} {SLOT_LABELS[k]}" for k in CHAT_SLOT_KEYS
+    )
+    st.caption(checklist)
+
     for msg in st.session_state.chat_messages:
-        with st.chat_message(msg["role"]):
+        with st.chat_message(msg["role"], avatar=CHAT_AVATARS.get(msg["role"])):
             st.write(msg["content"])
 
     user_msg = st.chat_input("메시지를 입력하세요")
     if user_msg:
         st.session_state.chat_messages.append({"role": "user", "content": user_msg})
+        with st.chat_message("user", avatar=CHAT_AVATARS["user"]):
+            st.write(user_msg)
+
         conversation_text = "\n".join(
             f"{m['role']}: {m['content']}" for m in st.session_state.chat_messages
         )
-        try:
-            result = chat_fill_slots(conversation_text, st.session_state.chat_known)
-            for k in CHAT_SLOT_KEYS:
-                if result.get(k) not in (None, ""):
-                    st.session_state.chat_known[k] = result[k]
-            reply = result.get("assistant_reply", "죄송합니다, 다시 한 번 말씀해 주시겠어요?")
-            st.session_state.chat_messages.append({"role": "assistant", "content": reply})
-
-            # 파악된 값을 폼에 실시간 반영
-            known = st.session_state.chat_known
-            if known.get("origin"):
-                st.session_state["f_origin"] = known["origin"]
-            if known.get("destination"):
-                st.session_state["f_dest"] = known["destination"]
-            if known.get("cargo_type"):
-                st.session_state["f_cargo"] = known["cargo_type"]
-            if known.get("weight_kg"):
-                st.session_state["f_weight"] = float(known["weight_kg"])
-            if known.get("desired_date"):
+        with st.chat_message("assistant", avatar=CHAT_AVATARS["assistant"]):
+            with st.spinner("생각하는 중..."):
                 try:
-                    st.session_state["f_date"] = datetime.strptime(
-                        known["desired_date"], "%Y-%m-%d"
-                    ).date()
-                except ValueError:
-                    pass
-        except Exception as e:
-            st.session_state.chat_messages.append(
-                {"role": "assistant", "content": f"처리 중 오류가 발생했습니다: {e}"}
-            )
+                    result = chat_fill_slots(conversation_text, st.session_state.chat_known)
+                    for k in CHAT_SLOT_KEYS:
+                        if result.get(k) not in (None, ""):
+                            st.session_state.chat_known[k] = result[k]
+                    reply = result.get("assistant_reply", "죄송합니다, 다시 한 번 말씀해 주시겠어요?")
+                except Exception as e:
+                    reply = f"처리 중 오류가 발생했습니다: {e}"
+            st.write(reply)
+        st.session_state.chat_messages.append({"role": "assistant", "content": reply})
+
+        # 파악된 값을 폼에 실시간 반영
+        known = st.session_state.chat_known
+        if known.get("origin"):
+            st.session_state["f_origin"] = known["origin"]
+        if known.get("destination"):
+            st.session_state["f_dest"] = known["destination"]
+        if known.get("cargo_type"):
+            st.session_state["f_cargo"] = known["cargo_type"]
+        if known.get("weight_kg"):
+            st.session_state["f_weight"] = float(known["weight_kg"])
+        if known.get("desired_date"):
+            try:
+                st.session_state["f_date"] = datetime.strptime(
+                    known["desired_date"], "%Y-%m-%d"
+                ).date()
+            except ValueError:
+                pass
         st.rerun()
 
     if st.button("대화 초기화", key="chat_reset"):
@@ -318,7 +335,10 @@ if submitted:
     )
     route_map = build_route_map(
         origin_lat, origin_lng, dest_lat, dest_lng,
+        truck_only_path=road.get("path"),
         origin_node=origin_node_tuple, dest_node=dest_node_tuple,
+        first_mile_path=intermodal_result.first_mile_path if intermodal_result else None,
+        last_mile_path=intermodal_result.last_mile_path if intermodal_result else None,
     )
     st.pydeck_chart(route_map)
     legend_bits = ["🟠 트럭 직송"]
