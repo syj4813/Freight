@@ -1,0 +1,56 @@
+# -*- coding: utf-8 -*-
+"""
+Gemini API 활용 — 역할을 의도적으로 제한한다.
+
+  - 하지 않는 것: 경로 최적화, 통합 판정, 요금 계산 (전부 결정론적
+    로직으로 처리 — 재현성과 설명가능성 확보 목적)
+  - 하는 것: (1) 화주의 자연어 입력을 구조화된 필드로 파싱
+             (2) 계산된 비교 결과를 화주에게 설명하는 문장 생성
+"""
+
+import json
+
+import requests
+
+GEMINI_API_KEY = ""  # TODO: Streamlit secrets 등으로 주입
+GEMINI_MODEL = "gemini-2.0-flash"
+GEMINI_URL = (
+    f"https://generativelanguage.googleapis.com/v1beta/models/"
+    f"{GEMINI_MODEL}:generateContent"
+)
+
+
+def _call_gemini(prompt: str) -> str:
+    resp = requests.post(
+        f"{GEMINI_URL}?key={GEMINI_API_KEY}",
+        json={"contents": [{"parts": [{"text": prompt}]}]},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    return data["candidates"][0]["content"]["parts"][0]["text"]
+
+
+def parse_free_text_order(text: str) -> dict:
+    """자연어 입력 -> 구조화된 필드(JSON) 파싱."""
+    prompt = f"""다음 화물 운송 요청 문장에서 정보를 추출해 JSON으로만 답하세요.
+필드: origin(출발지), destination(도착지), cargo_type(화물종류),
+weight_kg(중량, 숫자만), desired_date(YYYY-MM-DD, 알 수 없으면 null)
+
+문장: "{text}"
+
+JSON만 출력하세요. 다른 설명은 붙이지 마세요."""
+    raw = _call_gemini(prompt)
+    cleaned = raw.strip().removeprefix("```json").removesuffix("```").strip()
+    return json.loads(cleaned)
+
+
+def explain_comparison(comparison_rows: list[dict], consolidation_note: str) -> str:
+    """계산된 비교 결과를 화주 친화적 문장으로 요약."""
+    prompt = f"""아래는 화물 운송 수단별 비교 계산 결과입니다. 화주에게 보여줄
+2~3문장의 친절한 요약을 존댓말로 작성하세요. 숫자를 새로 만들어내지 말고
+주어진 데이터만 근거로 설명하세요.
+
+비교 데이터: {json.dumps(comparison_rows, ensure_ascii=False)}
+철도 통합운송 판정 메모: {consolidation_note}"""
+    return _call_gemini(prompt)
