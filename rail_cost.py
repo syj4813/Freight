@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
-"""철도(화물역 간) 구간 근사 요금/시간 계산."""
+"""철도(화물역 간) 구간 요금/시간 계산 — 실제 시각표 우선, 없으면 추정."""
 
 import math
+from datetime import datetime
 
 from rail_freight_nodes import (
     FREIGHT_NODES,
@@ -12,6 +13,7 @@ from rail_freight_nodes import (
     RAIL_HANDLING_FEE_WON,
     FreightNode,
 )
+from rail_schedule import find_next_departure
 
 
 def _haversine_km(lat1, lng1, lat2, lng2) -> float:
@@ -33,32 +35,57 @@ def nearest_freight_node(lat: float, lng: float) -> tuple[FreightNode, float]:
     return best, best_dist
 
 
-def estimate_rail_leg(origin_node: FreightNode, dest_node: FreightNode, weight_ton: float) -> dict:
-    """화물역 간 구간 근사 소요시간(분)/최종 운임(원) + 전철화 여부 판정.
+def estimate_rail_leg(
+    origin_node: FreightNode,
+    dest_node: FreightNode,
+    weight_ton: float,
+    departure_after: datetime,
+) -> dict:
+    """화물역 간 구간 소요시간/운임 + 전철화 여부 판정.
 
-    ⚠️ 소요시간·운임은 추정치. 전철화 여부는 각 화물역 접속 지선의
-    실제 전철화 상태(나무위키 참고, 교차검증 필요)를 근거로 판정 —
-    두 노드가 모두 전철화된 경우만 '전철', 하나라도 비전철이면 '디젤'로
-    간주 (디젤기관차가 전 구간을 견인하는 실무 관행을 단순화한 가정).
+    소요시간은 rail_schedule.py의 실제 시각표에서 먼저 찾고, 매칭되는
+    열차가 없으면(예: 순천-포항처럼 직행 노선이 없는 조합) 거리/평균속도
+    기반 추정치로 폴백한다. 'schedule_source' 필드로 어느 쪽인지 구분.
 
-    운임 = 거리 × 톤·km단가 × 청구중량(최저운임 톤수 적용) + 상하차
-    취급수수료(양단 2회). 최저운임·취급수수료가 없으면 소형 화물의
-    철도 운임이 트럭 대비 비현실적으로 저렴하게 계산되는 문제가 있어
-    반영함 (실제 화물 운임의 "최저 O톤 기준 청구" 관행 반영).
+    운임은 시각표 데이터에 없는 정보라 항상 추정치 — 거리 × 톤·km단가 ×
+    청구중량(최저운임 톤수 적용) + 상하차 취급수수료(양단 2회).
     """
     if origin_node.name == dest_node.name:
-        return {"distance_km": 0, "duration_min": 0, "fare_won": 0, "electrified": True}
+        return {
+            "distance_km": 0, "duration_min": 0, "fare_won": 0, "electrified": True,
+            "schedule_source": "estimated", "departure_dt": None, "arrival_dt": None, "train_no": None,
+        }
 
-    dist_km = _haversine_km(
-        origin_node.lat, origin_node.lng, dest_node.lat, dest_node.lng
+    dist_km = _haversine_km(origin_node.lat, origin_node.lng, dest_node.lat, dest_node.lng)
+    electrified = origin_node.electrified and dest_node.electrified
+
+    schedule = find_next_departure(
+        origin_node.schedule_station, dest_node.schedule_station, departure_after
     )
-    duration_min = (dist_km / AVG_FREIGHT_SPEED_KMH) * 60 + TERMINAL_HANDLING_MIN * 2
+
+    if schedule is not None:
+        duration_min = schedule["duration_min"]
+        schedule_source = "real"
+        departure_dt = schedule["departure_dt"]
+        arrival_dt = schedule["arrival_dt"]
+        train_no = schedule["train_no"]
+    else:
+        duration_min = round((dist_km / AVG_FREIGHT_SPEED_KMH) * 60 + TERMINAL_HANDLING_MIN * 2)
+        schedule_source = "estimated"
+        departure_dt = None
+        arrival_dt = None
+        train_no = None
+
     billing_weight_ton = max(weight_ton, MIN_BILLING_TON)
     fare = dist_km * RAIL_TON_KM_RATE_WON * billing_weight_ton + RAIL_HANDLING_FEE_WON * 2
-    electrified = origin_node.electrified and dest_node.electrified
+
     return {
         "distance_km": round(dist_km, 1),
-        "duration_min": round(duration_min),
+        "duration_min": duration_min,
         "fare_won": round(fare, -3),
         "electrified": electrified,
+        "schedule_source": schedule_source,
+        "departure_dt": departure_dt,
+        "arrival_dt": arrival_dt,
+        "train_no": train_no,
     }

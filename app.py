@@ -11,7 +11,7 @@
      명확히 구분 표시
 """
 
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 
 import streamlit as st
 
@@ -29,7 +29,21 @@ from cargo import classify_cargo_type, apply_surcharge, is_mode_restricted, Carg
 from gemini_assist import classify_cargo_category as gemini_classify_cargo
 from intermodal import estimate_intermodal
 
-st.set_page_config(page_title="소량 화물 운송수단 비교", layout="centered")
+st.set_page_config(page_title="소량 화물 운송수단 비교", layout="wide")
+
+MODE_ICONS = {
+    "트럭 단독": "🚛",
+    "퀵서비스": "🛵",
+    "KTX특송": "🚄",
+    "철도 통합운송": "🚆",
+}
+
+
+def _icon_for(label: str) -> str:
+    for key, icon in MODE_ICONS.items():
+        if label.startswith(key):
+            return icon
+    return "📦"
 
 # ── API 키 주입 (Streamlit Secrets) ─────────────────────────────
 import geocode as _geocode_mod
@@ -76,6 +90,7 @@ with st.form("order_form"):
         long_side_cm = st.number_input("최장변(cm)", min_value=1.0, value=40.0)
 
     desired_date = st.date_input("희망 발송일", value=date.today())
+    desired_time = st.time_input("희망 출발시각", value=time(9, 0))
     submitted = st.form_submit_button("비교하기")
 
 if submitted:
@@ -90,6 +105,14 @@ if submitted:
     origin_lat, origin_lng = origin_coord
     dest_lat, dest_lng = dest_coord
     weight_ton = weight_kg / 1000
+    departure_dt = datetime.combine(desired_date, desired_time)
+
+    def _eta(duration_min: float) -> str:
+        """소요시간(분)을 희망 출발시각에 더해 도착예정시각 문자열로 변환.
+        ⚠️ 실제 화물열차 시각표가 아니라 거리/평균속도 기반 추정 소요시간에
+        근거한 예상치입니다."""
+        arrival = departure_dt + timedelta(minutes=duration_min)
+        return arrival.strftime("%m/%d %H:%M")
 
     cargo_category = classify_cargo_type(cargo_type)  # 기본값: 키워드 매칭
     try:
@@ -111,6 +134,7 @@ if submitted:
         rows.append({
             "수단": "트럭 단독",
             "소요시간(분)": round(road["duration_min"]),
+            "수령예상": _eta(road["duration_min"]),
             "요금(원)": truck_fare,
             "GWP(kgCO2eq)": emission_cmp["truck"]["gwp_kg_co2e"],
             "PM(kg)": emission_cmp["truck"]["pm_kg"],
@@ -127,6 +151,7 @@ if submitted:
         rows.append({
             "수단": "퀵서비스",
             "소요시간(분)": round(road["duration_min"] * 0.8),  # 급행 가정, 추정
+            "수령예상": _eta(road["duration_min"] * 0.8),
             "요금(원)": apply_surcharge(quick_fare, cargo_category),
             "데이터 성격": "추정치 (화물종류 할증 반영)",
         })
@@ -144,6 +169,7 @@ if submitted:
         rows.append({
             "수단": "KTX특송",
             "소요시간(분)": 240,  # 반나절 이내, 추정
+            "수령예상": _eta(240),
             "요금(원)": "짐캐리 공시요금 확인 필요",
             "데이터 성격": "규격: 실제 기준 / 요금: 미확정(TODO)",
         })
@@ -157,17 +183,24 @@ if submitted:
 
     if consolidation.eligible:
         try:
-            im = estimate_intermodal(origin_lat, origin_lng, dest_lat, dest_lng, weight_ton)
+            im = estimate_intermodal(
+                origin_lat, origin_lng, dest_lat, dest_lng, weight_ton, departure_dt
+            )
             mode_label = "전철화 구간" if im.electrified else "비전철(디젤) 구간"
+            schedule_note = (
+                f"실제 시각표 (열차번호 {im.train_no})" if im.schedule_source == "real"
+                else "직행 열차 시각표 매칭 실패 → 거리/속도 기반 추정"
+            )
             rows.append({
                 "수단": f"철도 통합운송({mode_label})",
                 "소요시간(분)": im.total_duration_min,
+                "수령예상": im.arrival_dt.strftime("%m/%d %H:%M"),
                 "요금(원)": apply_surcharge(im.total_fare_won, cargo_category),
                 "GWP(kgCO2eq)": im.total_gwp_kg_co2e,
                 "PM(kg)": im.total_pm_kg,
                 "데이터 성격": (
-                    "첫마일/막판마일 트럭 구간 포함 door-to-door 추정치 "
-                    f"({im.first_mile_km}km + 철도 {im.rail_km}km + {im.last_mile_km}km)"
+                    f"소요시간: {schedule_note} / 요금: 추정치 "
+                    f"({im.first_mile_km}km 트럭 + 철도 {im.rail_km}km + {im.last_mile_km}km 트럭)"
                 ),
             })
             st.success(
@@ -196,10 +229,63 @@ if submitted:
         )
         st.info(f"철도 통합운송{node_info}: {consolidation.reason}")
 
+    st.divider()
     st.subheader("비교 결과")
-    st.table(rows)
+
+    if rows:
+        numeric_fare_rows = [r for r in rows if isinstance(r["요금(원)"], (int, float))]
+        cheapest = min(numeric_fare_rows, key=lambda r: r["요금(원)"])["수단"] if numeric_fare_rows else None
+        fastest = min(rows, key=lambda r: r["소요시간(분)"])["수단"]
+        greenest = min(
+            (r for r in rows if "GWP(kgCO2eq)" in r), key=lambda r: r["GWP(kgCO2eq)"], default=None
+        )
+        greenest_label = greenest["수단"] if greenest else None
+
+        cols = st.columns(len(rows))
+        for col, row in zip(cols, rows):
+            with col:
+                with st.container(border=True):
+                    st.markdown(f"### {_icon_for(row['수단'])} {row['수단']}")
+                    badges = []
+                    if row["수단"] == cheapest:
+                        badges.append("💰 최저가")
+                    if row["수단"] == fastest:
+                        badges.append("⚡ 최단시간")
+                    if row["수단"] == greenest_label:
+                        badges.append("🌱 최저탄소")
+                    if badges:
+                        st.caption(" · ".join(badges))
+
+                    fare_display = (
+                        f"{row['요금(원)']:,}원"
+                        if isinstance(row["요금(원)"], (int, float))
+                        else row["요금(원)"]
+                    )
+                    st.metric("요금", fare_display)
+                    st.metric("소요시간", f"{row['소요시간(분)']}분")
+                    st.write(f"📅 수령예상: **{row.get('수령예상', '-')}**")
+                    if "GWP(kgCO2eq)" in row:
+                        st.write(f"🏭 GWP: {row['GWP(kgCO2eq)']} kgCO2eq")
+                    st.caption(row["데이터 성격"])
+
+        # ── 요금/시간 비교 막대 그래프 ──
+        if numeric_fare_rows:
+            st.write("")
+            chart_col1, chart_col2 = st.columns(2)
+            with chart_col1:
+                st.caption("요금 비교 (원)")
+                st.bar_chart({r["수단"]: r["요금(원)"] for r in numeric_fare_rows})
+            with chart_col2:
+                st.caption("소요시간 비교 (분)")
+                st.bar_chart({r["수단"]: r["소요시간(분)"] for r in rows})
+
+        with st.expander("상세 데이터 표로 보기"):
+            st.table(rows)
+    else:
+        st.warning("비교 가능한 운송수단이 없습니다.")
 
     st.caption(
         "※ '추정치'로 표시된 항목은 공개 데이터가 없어 근사식으로 산출한 값입니다. "
-        "실제 서비스 전환 시 코레일 화물 계약운임, 짐캐리 공시요금 등으로 교체가 필요합니다."
+        "실제 서비스 전환 시 코레일 화물 계약운임, 짐캐리 공시요금 등으로 교체가 필요합니다. "
+        "수령예상시각은 실제 화물열차 시각표가 아닌 평균속도 기반 추정치입니다."
     )
