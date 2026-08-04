@@ -32,6 +32,7 @@ from gemini_assist import parse_free_text_order, explain_comparison, explain_car
 from intermodal import estimate_intermodal
 from map_view import build_route_map
 from tz_utils import today_kst
+import shared_store
 
 st.set_page_config(page_title="소량 화물 운송수단 비교", layout="wide")
 
@@ -432,6 +433,58 @@ if submitted:
 
         with st.expander("상세 데이터 표로 보기"):
             st.table(rows)
+
+        # ── 예약 확정 → 공유 저장소 기록 ──────────────────────────
+        # 실시간 Door-to-Door 추적·트럭기사 앱·관제센터 연계는 "철도 통합운송"
+        # 예약 건에 한정한다. 트럭 단독/퀵서비스/KTX특송은 화물역(CY) 환적
+        # 스테이지 자체가 없어 아래 후단 화면들의 데이터 모델과 맞지 않는다.
+        st.divider()
+        st.subheader("예약 확정")
+        rail_row = next((r for r in rows if r["수단"].startswith("철도 통합운송")), None)
+
+        if rail_row and consolidation.eligible and intermodal_result is not None:
+            chosen_label = st.selectbox(
+                "예약할 운송수단을 선택하세요",
+                [r["수단"] for r in rows],
+                index=[r["수단"] for r in rows].index(rail_row["수단"]),
+            )
+            if chosen_label == rail_row["수단"]:
+                if st.button("✅ 예약 확정 (Door-to-Door 추적 시작)"):
+                    gwp_savings = (
+                        emission_cmp["truck"]["gwp_kg_co2e"] - intermodal_result.total_gwp_kg_co2e
+                        if emission_cmp is not None else None
+                    )
+                    shipment_id = shared_store.add_shipment(
+                        화물종류=cargo_type,
+                        출발지주소=origin_addr,
+                        도착지주소=dest_addr,
+                        출발화물역=consolidation.origin_node_name,
+                        도착화물역=consolidation.dest_node_name,
+                        중량톤=weight_ton,
+                        예약시각=datetime.now(),
+                        희망출발시각=departure_dt,
+                        도착예정시각=intermodal_result.arrival_dt,
+                        요금원=rail_row["요금(원)"],
+                        **{
+                            "GWP(kgCO2eq)": rail_row.get("GWP(kgCO2eq)"),
+                            "GWP절감(kgCO2eq대비트럭)": gwp_savings,
+                        },
+                        결합화주ID목록=consolidation.grouped_order_ids,
+                        열차번호=getattr(intermodal_result, "train_no", None),
+                        시각표출처=intermodal_result.schedule_source,
+                    )
+                    st.session_state["last_shipment_id"] = shipment_id
+                    st.success(
+                        f"예약이 확정되었습니다. 화물ID **{shipment_id}** — "
+                        "왼쪽 페이지 목록의 '화주용 실시간추적'에서 진행 상황을 확인하세요."
+                    )
+            else:
+                st.caption(
+                    f"'{chosen_label}'은(는) 화물역 환적 구간이 없어 "
+                    "실시간 추적·트럭기사 연계 대상이 아닙니다. 이 창에서는 예약을 기록하지 않습니다."
+                )
+        else:
+            st.caption("※ 철도 통합운송이 가능한 건에 한해 예약 확정 및 실시간 추적을 제공합니다.")
     else:
         st.warning("비교 가능한 운송수단이 없습니다.")
 
@@ -440,3 +493,19 @@ if submitted:
         "실제 서비스 전환 시 코레일 화물 계약운임, 짐캐리 공시요금 등으로 교체가 필요합니다. "
         "수령예상시각은 실제 화물열차 시각표가 아닌 평균속도 기반 추정치입니다."
     )
+
+st.divider()
+st.subheader("후단 서비스 바로가기")
+nav1, nav2, nav3 = st.columns(3)
+with nav1:
+    st.markdown("#### 📦 화주용 실시간추적")
+    st.caption("예약된 화물의 door-to-door 진행 상황 추적")
+    st.page_link("pages/1_화주용_실시간추적.py", label="열기 →", icon="📦")
+with nav2:
+    st.markdown("#### 🚚 트럭기사용 앱")
+    st.caption("배차 안내, 공차 방지 복귀화물 매칭")
+    st.page_link("pages/2_트럭기사용_앱.py", label="열기 →", icon="🚚")
+with nav3:
+    st.markdown("#### 🛰️ 관제센터")
+    st.caption("전체 예약 현황, 탄소절감·리드타임 KPI")
+    st.page_link("pages/3_관제센터.py", label="열기 →", icon="🛰️")
