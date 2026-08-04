@@ -70,17 +70,50 @@ def get_shipment(shipment_id: str) -> dict | None:
 
 
 def current_stage_idx(record: dict) -> int:
-    """예약시각 대비 도착예정시각까지의 경과 비율로 8단계 중 인덱스를 계산.
+    """화물의 현재 진행 단계(8단계 중 인덱스)를 계산.
 
-    random 대신 실제 타임스탬프 기반 결정론적 계산 — 다만 이것도 여전히
-    "화물이 정말 그 단계에 있다"는 실측치는 아니라 시간 흐름을 선형 근사한
-    시뮬레이션이라는 한계가 있다 (실제 GPS/RFID 연동 전까지는 불가피).
+    두 가지 방식이 있다.
+
+    1) 시각표출처가 'real'이고 철도출발/도착시각이 있으면 — 공공데이터
+       화물열차 시각표(freight_train_schedule.csv)에서 나온 실제 열차
+       출발/도착 시각을 그대로 경계값으로 써서 지금이 "철도 운송중"
+       구간에 있는지 정확히 판정한다. random이나 선형근사가 아니라
+       실제 시각표 데이터에 근거한 판정이다.
+    2) 시각표에 매칭되는 열차가 없어(순천-포항처럼 직행 노선 없는 조합)
+       추정치로 폴백한 예약이면, 정밀한 열차 출발/도착 경계를 알 수
+       없으므로 희망출발시각~도착예정시각 사이 경과 비율로 근사한다.
+       이 경우도 여전히 "화물이 정말 그 단계에 있다"는 실측치는 아니라
+       시간 흐름을 선형 근사한 시뮬레이션이라는 한계가 있다.
     """
     now = datetime.now()
-    start = record.get("예약시각")
-    eta = record.get("도착예정시각")
-    if not start or not eta or eta <= start:
+    t_start = record.get("희망출발시각")
+    t_eta = record.get("도착예정시각")
+    if not t_start or not t_eta:
         return 0
-    ratio = (now - start).total_seconds() / (eta - start).total_seconds()
+
+    if now < t_start:
+        return 0  # 아직 출발 전 (화주 공장 출발 대기)
+    if now >= t_eta:
+        return len(STAGE_LABELS) - 1  # 최종 목적지 도착
+
+    rail_dep = record.get("철도출발시각")
+    rail_arr = record.get("철도도착시각")
+    t1 = record.get("첫마일완료시각")
+    t4 = record.get("막판마일시작시각")
+
+    if record.get("시각표출처") == "real" and rail_dep and rail_arr and t1 and t4:
+        boundaries = [t_start, t1, rail_dep, rail_arr, t4, t_eta]
+        # boundaries[i] <= now < boundaries[i+1] 인 구간에 매핑
+        # STAGE_LABELS 인덱스: 1=첫마일이동중, 3=철도상차대기, 4=철도운송중,
+        # 6=막판마일배송중 (2:CY도착, 5:목적지도착은 경계 순간에만 존재하는
+        # 시점이라 인접 구간에 흡수)
+        stage_for_segment = [1, 3, 4, 6]
+        for i in range(len(boundaries) - 1):
+            if boundaries[i] <= now < boundaries[i + 1]:
+                return stage_for_segment[i]
+        return 6
+
+    # ── 폴백: 실제 시각표 매칭 실패(추정치) → 경과 비율 선형 근사 ──
+    ratio = (now - t_start).total_seconds() / (t_eta - t_start).total_seconds()
     ratio = min(max(ratio, 0.0), 0.999)
     return min(int(ratio * len(STAGE_LABELS)), len(STAGE_LABELS) - 1)

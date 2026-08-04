@@ -39,6 +39,14 @@ class IntermodalResult:
     last_mile_km: float
     first_mile_path: list[tuple[float, float]]
     last_mile_path: list[tuple[float, float]]
+    # ── 단계(stage) 판정용 중간 타임스탬프 ──
+    # schedule_source == 'real'일 때만 rail_departure_dt가 채워진다(실제
+    # CSV 시각표 기반). 'estimated'면 None — 이 경우 하류(shared_store)에서는
+    # 정밀 단계 판정을 포기하고 예약~도착 경과비율 방식으로 폴백해야 한다.
+    station_ready_dt: datetime  # 첫마일 트럭 도착 + 상차처리 완료 시각
+    rail_departure_dt: datetime | None  # 실제 열차 출발시각 (real일 때만)
+    rail_arrival_dt: datetime  # 열차 도착시각 (real이면 실제, 아니면 추정)
+    station_release_dt: datetime  # 하차처리 완료 + 막판마일 트럭 출발 시각
 
 
 def estimate_intermodal(
@@ -113,4 +121,8 @@ def estimate_intermodal(
         last_mile_km=last_mile["distance_km"],
         first_mile_path=first_mile["path"],
         last_mile_path=last_mile["path"],
+        station_ready_dt=ready_at_origin_station,
+        rail_departure_dt=rail_leg["departure_dt"],  # real이 아니면 None
+        rail_arrival_dt=rail_arrival_dt,
+        station_release_dt=ready_for_last_mile,
     )

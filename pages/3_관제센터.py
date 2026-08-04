@@ -44,6 +44,34 @@ top4.metric("평균 리드타임", f"{avg_lead_time:.0f}분" if lead_times_min e
 
 st.divider()
 
+st.subheader("현재 상태별 현황")
+st.caption(
+    "실제 화물열차 시각표(CSV) 기반 예약은 열차 출발/도착 시각으로 정확히 판정하고, "
+    "직행 열차가 없어 추정치로 계산된 예약은 경과 비율로 근사합니다."
+)
+stage_counts = Counter(shared_store.current_stage_idx(s) for s in shipments)
+stage_cols = st.columns(len(shared_store.STAGE_LABELS))
+for i, (col, label) in enumerate(zip(stage_cols, shared_store.STAGE_LABELS)):
+    col.metric(label, f"{stage_counts.get(i, 0)}건")
+
+in_transit = [s for s in shipments if shared_store.current_stage_idx(s) == 4]
+if in_transit:
+    st.write("**현재 철도 운송중** (CSV 시각표 기준 실제 열차 탑승 구간):")
+    st.dataframe(
+        [
+            {
+                "화물ID": s["화물ID"],
+                "구간": f"{s.get('출발화물역','-')}→{s.get('도착화물역','-')}",
+                "열차번호": s.get("열차번호", "-"),
+                "철도도착예정": s["철도도착시각"].strftime("%m/%d %H:%M") if s.get("철도도착시각") else "-",
+            }
+            for s in in_transit
+        ],
+        use_container_width=True, hide_index=True,
+    )
+
+st.divider()
+
 left, right = st.columns([1.4, 1])
 
 with left:

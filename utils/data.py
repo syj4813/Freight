@@ -17,4 +17,16 @@ STATIONS = {node.name: (node.lat, node.lng) for node in FREIGHT_NODES}
 
 CARGO_TYPES = ["컨테이너 20FT", "컨테이너 40FT", "냉동 컨테이너", "일반 화물"]
 
-DRIVER_NAMES = ["김도현", "이수민", "박정우", "최은서", "장민호"]
+# 기사별 현재 위치 — 실제 GPS 연동 전이라 하드코딩. 7개 화물역에 1명씩
+# 배치해 트럭기사 앱에서 화물역별 매칭 후보를 데모로 확인할 수 있게 함.
+DRIVER_CURRENT_STATION = {
+    "김도현": "오봉역",
+    "이수민": "의왕역",
+    "박정우": "부산항역(신항)",
+    "최은서": "부산진역",
+    "장민호": "천안역",
+    "한지수": "순천역",
+    "오세훈": "포항역",
+}
+
+DRIVER_NAMES = list(DRIVER_CURRENT_STATION.keys())

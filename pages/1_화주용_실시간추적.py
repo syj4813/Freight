@@ -11,6 +11,7 @@ from datetime import datetime
 import streamlit as st
 
 import shared_store
+from gemini_assist import assess_delay_risk
 
 st.set_page_config(page_title="화주용 실시간추적", page_icon="📦", layout="wide")
 
@@ -59,6 +60,33 @@ if eta:
 else:
     c3.metric("남은 예상 시간", "-")
 c4.metric("현재 단계", f"{stage_idx + 1}/{len(shared_store.STAGE_LABELS)}", stage_label)
+
+st.divider()
+st.subheader("🤖 AI 지연위험도")
+st.caption(
+    "⚠️ 실제 지연 이력 데이터가 없어 학습된 예측 모델이 아닙니다. 아래 신호를 "
+    "근거로 Gemini가 정성적으로 평가한 등급이며, 호출마다 표현이 달라질 수 있어 참고용입니다."
+)
+
+
+@st.cache_data(show_spinner=False)
+def _cached_delay_risk(signals_key: str, signals: dict) -> dict:
+    return assess_delay_risk(signals)
+
+
+t_start = record.get("희망출발시각")
+signals = {
+    "시각표출처": record.get("시각표출처"),
+    "결합배송여부": bool(record.get("결합화주ID목록")),
+    "출발요일": t_start.strftime("%A") if t_start else None,
+    "구간": f"{record.get('출발화물역','-')}→{record.get('도착화물역','-')}",
+}
+try:
+    risk = _cached_delay_risk(record["화물ID"], signals)
+    risk_icon = {"낮음": "🟢", "보통": "🟡", "높음": "🔴"}.get(risk.get("level"), "⚪")
+    st.info(f"{risk_icon} **{risk.get('level','판정불가')}** — {risk.get('reason','-')}")
+except Exception:
+    st.caption("AI 위험도 평가 생성 실패 (API 키 확인 필요)")
 
 st.divider()
 st.subheader("진행 경로")
