@@ -126,3 +126,52 @@ def explain_carbon_savings(gwp_savings_kg: float, mileage: int, tree_equivalent:
 
 문장만 출력하세요."""
     return _call_gemini(prompt)
+
+
+def assess_delay_risk(signals: dict) -> dict:
+    """예약 1건의 지연 위험을 낮음/보통/높음 등급 + 근거 한 문장으로 평가.
+
+    ⚠️ 이건 학습된 예측 모델이 아니다. 실제 지연 이력 데이터가 없어서
+    (freight_train_schedule.csv는 정적 스냅샷이지 운행 결과 기록이 아님)
+    통계적 예측 모델을 만들 근거 자체가 없다. 대신 이미 계산된 신호
+    (시각표 매칭 여부, 결합 배송 여부, 요일 등)를 LLM에게 주고 정성
+    평가를 요청하는 방식이다 — 같은 입력이라도 호출마다 등급이 달라질
+    수 있어(재현성 낮음) 참고용 표시로만 써야 하고, "AI가 예측했다"보다는
+    "AI가 신호를 근거로 평가했다" 쪽에 가깝다.
+    """
+    prompt = f"""아래는 철도 통합운송 예약 1건의 지연 위험을 판단하기 위한
+신호입니다. 신호만 근거로 위험 등급(낮음/보통/높음) 하나와, 그 이유를
+한 문장(존댓말)으로 평가하세요. 신호에 없는 정보를 추측해서 만들어내지
+마세요.
+
+신호: {json.dumps(signals, ensure_ascii=False)}
+
+다음 JSON 형식으로만 답하세요: {{"level": "낮음|보통|높음", "reason": "..."}}"""
+    raw = _call_gemini(prompt).strip().removeprefix("```json").removesuffix("```").strip()
+    try:
+        result = json.loads(raw)
+        if result.get("level") not in ("낮음", "보통", "높음"):
+            raise ValueError("unexpected level")
+        return result
+    except Exception:
+        return {"level": "판정불가", "reason": "AI 응답을 해석하지 못했습니다."}
+
+
+def explain_match(score: float, factors: dict) -> str:
+    """복귀 화물 매칭 후보의 결합적합도 점수를 트럭기사에게 보여줄 한 문장으로 설명.
+
+    ⚠️ 점수 자체는 여전히 명시적 규칙식(consolidation.py의 결합 기준)이
+    계산한 값이고, Gemini는 그 근거를 자연어로 풀어 설명하는 역할만
+    한다 — 점수나 다른 숫자를 새로 만들어내지 않는다 (계산은 코드,
+    설명은 AI 원칙, explain_carbon_savings와 동일한 방식).
+    """
+    prompt = f"""아래는 트럭기사에게 보여줄 복귀 화물 매칭 후보의 결합적합도
+점수와 근거 신호입니다. 왜 이 점수가 나왔는지 기사님께 보여줄 한
+문장(존댓말)으로 설명하세요. 주어진 숫자 외의 다른 수치를 새로
+만들어내지 마세요.
+
+결합적합도 점수: {score}
+근거 신호: {json.dumps(factors, ensure_ascii=False)}
+
+문장만 출력하세요."""
+    return _call_gemini(prompt)
