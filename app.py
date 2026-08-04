@@ -43,6 +43,31 @@ MODE_ICONS = {
     "철도 통합운송": "🚆",
 }
 
+# ── API 호출 캐시 래퍼 ───────────────────────────────────────────
+# "예약 확정" 버튼처럼 폼 밖의 위젯을 눌러도 이 파일 전체가 다시 실행되는데
+# (아래 "비교 결과 화면 유지" 참고), 매번 같은 입력으로 카카오맵/제미나이
+# API를 다시 호출하면 느리고 비용이 든다. 입력이 그대로면 캐시로 즉시
+# 반환되게 감싼다.
+@st.cache_data(show_spinner=False)
+def _cached_geocode(addr: str):
+    return geocode_address(addr)
+
+
+@st.cache_data(show_spinner=False)
+def _cached_road_distance(origin_lng, origin_lat, dest_lng, dest_lat):
+    return get_road_distance_duration(origin_lng, origin_lat, dest_lng, dest_lat)
+
+
+@st.cache_data(show_spinner=False)
+def _cached_gemini_classify(cargo_type_text: str):
+    return gemini_classify_cargo(cargo_type_text)
+
+
+@st.cache_data(show_spinner=False)
+def _cached_intermodal(origin_lat, origin_lng, dest_lat, dest_lng, weight_ton, departure_dt):
+    return estimate_intermodal(origin_lat, origin_lng, dest_lat, dest_lng, weight_ton, departure_dt)
+
+
 
 def _icon_for(label: str) -> str:
     for key, icon in MODE_ICONS.items():
@@ -204,9 +229,18 @@ with st.form("order_form"):
     submitted = st.form_submit_button("비교하기")
 
 if submitted:
+    # "비교하기"를 누른 이 실행에서만 True가 되는 submitted 값 그대로 아래
+    # 블록의 조건으로 쓰면, 블록 안의 "예약 확정" 버튼을 누르는 순간 다시
+    # 실행되는 스크립트에서는 submitted가 다시 False가 되어(폼을 다시
+    # 제출한 게 아니므로) 이 블록 전체가 사라지고 예약 확정 클릭 자체가
+    # 무시된다. session_state 플래그로 "결과 화면을 계속 보여줄지"를 별도로
+    # 유지해서, 블록 내부의 버튼들이 눌려도 화면이 사라지지 않게 한다.
+    st.session_state["show_comparison"] = True
+
+if st.session_state.get("show_comparison"):
     with st.spinner("주소 확인 및 경로 계산 중..."):
-        origin_coord = geocode_address(origin_addr)
-        dest_coord = geocode_address(dest_addr)
+        origin_coord = _cached_geocode(origin_addr)
+        dest_coord = _cached_geocode(dest_addr)
 
     if not origin_coord or not dest_coord:
         st.error("주소를 확인할 수 없습니다. 정확한 주소를 입력해 주세요.")
@@ -226,7 +260,7 @@ if submitted:
 
     cargo_category = classify_cargo_type(cargo_type)  # 기본값: 키워드 매칭
     try:
-        cargo_category = CargoCategory(gemini_classify_cargo(cargo_type))
+        cargo_category = CargoCategory(_cached_gemini_classify(cargo_type))
         classify_source = "Gemini 분류"
     except Exception as e:
         classify_source = "키워드 매칭 (Gemini 호출 실패로 폴백)"
@@ -238,7 +272,7 @@ if submitted:
 
     # ── 1) 트럭 단독 (기준) — 소요시간은 실시간, 요금은 추정치 ──
     try:
-        road = get_road_distance_duration(origin_lng, origin_lat, dest_lng, dest_lat)
+        road = _cached_road_distance(origin_lng, origin_lat, dest_lng, dest_lat)
         truck_tier = select_truck_tier(weight_ton)
         truck_fare = apply_surcharge(estimate_truck_fare(road["distance_km"], weight_ton), cargo_category)
         emission_cmp = calculate_truck_vs_rail_savings(road["distance_km"], weight_ton)
@@ -295,7 +329,7 @@ if submitted:
 
     if consolidation.eligible:
         try:
-            im = estimate_intermodal(
+            im = _cached_intermodal(
                 origin_lat, origin_lng, dest_lat, dest_lng, weight_ton, departure_dt
             )
             intermodal_result = im
