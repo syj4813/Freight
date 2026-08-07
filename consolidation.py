@@ -1,114 +1,156 @@
 # -*- coding: utf-8 -*-
+"""화차 배치 추천 — 서모게이트 LightGBM 모델(150개 트리) 파이썬 이식.
+
+⚠️ 이 모델은 사용자가 별도로 학습해 브라우저 데모(HTML)로 만든 걸 그대로
+   가져온 것입니다. 트리 구조(car_assignment_model.json)는 실제 학습된
+   가중치이고, 여기서는 그 트리를 순회해 추론(evalTree/predict)하는
+   로직만 JS에서 Python으로 옮겼습니다 — 새 모델을 만들거나 재학습한
+   게 아닙니다.
+⚠️ 다만 학습에 쓰인 정답 라벨(suitability_score)은 실제 코레일 배치
+   결과가 아니라 사용자가 자체 정의한 합성 규칙 기반 라벨입니다. 즉
+   "모델링 방식은 진짜, 배우는 대상(정답)은 자체 정의"라는 한계가 있고,
+   실제 운영 기준 정확도를 보장하지 않습니다 (원본 데모의 고지 그대로).
+⚠️ 화차 편성(개별 화차 타입/최대적재량/현재적재량/위험물차 위치) 데이터는
+   코레일에서 아직 못 받아서, 이 모듈이 자체적으로 mock 편성을 생성합니다
+   (generate_mock_train_composition). random이 아니라 열차번호를 시드로 한
+   결정론적 생성이라 같은 열차는 항상 같은 편성이 나옵니다 — 그래도
+   "실제 편성"은 아니라는 점은 동일합니다.
 """
-소량 화물 통합(consolidation) — 규칙 기반 그룹핑.
 
-방식: 같은 출발 화물역-도착 화물역 쌍 + 희망일 ±2일 이내인 화주끼리
-      묶어서, 합산 중량이 LCL 최소 결합 기준(MIN_CONSOLIDATION_TON)을
-      넘는지 판정한다. 컨테이너를 완전히 채울 필요는 없음 —
-      단독으로 컨테이너를 다 채우는 대형 화물(CONTAINER_MAX_TON 이상)은
-      풀 결합 없이 바로 단독 발송으로 처리한다.
-
-DBSCAN 등 밀도 기반 군집화 대신 이 방식을 쓰는 이유:
-  - 표본이 적은 데모 환경에서 결과 재현성이 높고, 판정 근거를
-    한 줄로 설명 가능 (심사 질의응답에서 방어 가능)
-  - 물류 현실상 화주가 신경 쓰는 건 좌표 간 기하학적 거리가 아니라
-    "어느 화물역을 쓸 수 있는가"이므로 규칙 기반이 구조에 더 부합
-"""
-
+import hashlib
+import json
 from dataclasses import dataclass
-from datetime import date, timedelta
+from pathlib import Path
 
-from rail_freight_nodes import CONTAINER_MAX_TON, MIN_CONSOLIDATION_TON, MIN_SHIPMENT_TON_FOR_RAIL
-from rail_cost import nearest_freight_node
+MODEL_PATH = Path(__file__).parent / "car_assignment_model.json"
+
+CAR_TYPES = ["무개차", "유개차", "컨테이너차", "탱크차", "평판차"]
+POSITIONS = ["전부", "중부", "후부"]
+
+_model_cache: dict | None = None
+
+
+def _get_model() -> dict:
+    global _model_cache
+    if _model_cache is None:
+        with open(MODEL_PATH, encoding="utf-8") as f:
+            _model_cache = json.load(f)
+    return _model_cache
+
+
+def _eval_tree(node: dict, x: list) -> float:
+    if "leaf" in node:
+        return node["leaf"]
+    v = x[node["f"]]
+    go_left = node["dl"] if v is None else (v <= node["th"])
+    return _eval_tree(node["l"] if go_left else node["r"], x)
+
+
+def predict_raw(x: list) -> float:
+    """트리 150개 리프값 합산 — JS predict()와 동일 로직."""
+    model = _get_model()
+    return sum(_eval_tree(t, x) for t in model["trees"])
+
+
+def _clamp01(v: float) -> float:
+    return max(0.0, min(1.0, v))
 
 
 @dataclass
-class ShipperOrder:
-    order_id: str
-    origin_lat: float
-    origin_lng: float
-    dest_lat: float
-    dest_lng: float
-    weight_ton: float
-    desired_date: date
+class TrainCar:
+    car_index: int  # 1-base
+    car_type: str
+    max_load_kg: float
+    current_load_kg: float
+    remaining_capacity_m3: float
+    distance_from_hazmat_car: int  # 위험물차와 몇 칸 떨어져 있는지
+    position: str  # 전부/중부/후부 (car_index/total_cars 비율로 결정)
 
 
-@dataclass
-class ConsolidationResult:
-    eligible: bool
-    reason: str
-    origin_node_name: str = ""
-    dest_node_name: str = ""
-    grouped_order_ids: list[str] | None = None
-    total_weight_ton: float = 0.0
+def _derive_position(car_index: int, total_cars: int) -> str:
+    rel = car_index / total_cars
+    if rel <= 1 / 3:
+        return "전부"
+    if rel <= 2 / 3:
+        return "중부"
+    return "후부"
 
 
-def evaluate_consolidation(
-    new_order: ShipperOrder,
-    pool: list[ShipperOrder],
-    date_window_days: int = 2,
-) -> ConsolidationResult:
-    """새 주문이 (단독으로 또는 풀과 결합해) 철도 이용 가능한지 판정."""
-    if new_order.weight_ton < MIN_SHIPMENT_TON_FOR_RAIL:
-        return ConsolidationResult(
-            False,
-            f"{new_order.weight_ton * 1000:.0f}kg은 소포 단위(최소 {MIN_SHIPMENT_TON_FOR_RAIL * 1000:.0f}kg 미만)"
-            f"라 철도 화물 통합 대상이 아닙니다 — 퀵서비스·KTX특송을 이용하세요.",
-        )
+def generate_mock_train_composition(train_no: str, total_cars: int = 20) -> list[TrainCar]:
+    """열차번호를 시드로 한 결정론적 mock 화차 편성 생성.
 
-    origin_node, _ = nearest_freight_node(new_order.origin_lat, new_order.origin_lng)
-    dest_node, _ = nearest_freight_node(new_order.dest_lat, new_order.dest_lng)
+    ⚠️ 실제 편성 데이터가 없어 만든 대체값입니다. 화차 종류는 열차번호
+    해시로 순환 배정하고, 적재량은 화차 종류별 그럴듯한 범위 안에서
+    해시 기반으로 정합니다 — random.random()이 아니라 hashlib 기반이라
+    같은 열차번호는 항상 같은 편성이 나옵니다(재현 가능).
+    """
+    seed = int(hashlib.sha256(train_no.encode()).hexdigest(), 16)
+    cars = []
+    hazmat_car_index = 1 + (seed % total_cars)  # 위험물(탱크차) 위치 하나 고정 배정
+    for i in range(1, total_cars + 1):
+        local_seed = (seed + i * 7919) % (2**32)
+        if i == hazmat_car_index:
+            car_type = "탱크차"
+        else:
+            car_type = CAR_TYPES[(local_seed // 97) % len(CAR_TYPES)]
+        max_load = {"무개차": 40000, "유개차": 35000, "컨테이너차": 45000,
+                    "탱크차": 38000, "평판차": 42000}[car_type]
+        current_load = max_load * (0.1 + (local_seed % 60) / 100)  # 10~70% 적재 중
+        remaining_vol = 5.0 + (local_seed % 400) / 10  # 5.0~44.9 m3
+        cars.append(TrainCar(
+            car_index=i,
+            car_type=car_type,
+            max_load_kg=round(max_load),
+            current_load_kg=round(current_load),
+            remaining_capacity_m3=round(remaining_vol, 1),
+            distance_from_hazmat_car=abs(i - hazmat_car_index),
+            position=_derive_position(i, total_cars),
+        ))
+    return cars
 
-    if origin_node.name == dest_node.name:
-        return ConsolidationResult(False, "출발/도착이 같은 화물역 권역이라 철도 이용 실익이 없습니다.")
 
-    # 1) 단독으로 컨테이너 기준을 채우는 대형 화물인 경우
-    if new_order.weight_ton >= CONTAINER_MAX_TON:
-        return ConsolidationResult(
-            True,
-            "단독 화물만으로 철도 이용 가능",
-            origin_node.name,
-            dest_node.name,
-            [new_order.order_id],
-            new_order.weight_ton,
-        )
+def recommend_cars(
+    cargo_weight_kg: float,
+    cargo_length_cm: float,
+    cargo_width_cm: float,
+    cargo_height_cm: float,
+    hazmat: bool,
+    fragile: bool,
+    cars: list[TrainCar],
+    top_n: int = 5,
+) -> list[dict]:
+    """화차 편성 전체에 대해 적합도 점수를 계산해 상위 top_n 반환."""
+    model = _get_model()
+    feature_names: list[str] = model["feature_names"]
+    encoders: dict = model["encoders"]
+    total_cars = len(cars)
 
-    # 2) 같은 화물역 쌍 + 희망일 인접 화주들과 그룹핑
-    window_start = new_order.desired_date - timedelta(days=date_window_days)
-    window_end = new_order.desired_date + timedelta(days=date_window_days)
+    results = []
+    for car in cars:
+        feat = {
+            "cargo_weight_kg": cargo_weight_kg,
+            "cargo_length_cm": cargo_length_cm,
+            "cargo_width_cm": cargo_width_cm,
+            "cargo_height_cm": cargo_height_cm,
+            "hazmat_class": 1 if hazmat else 0,
+            "fragile_flag": 1 if fragile else 0,
+            "train_total_cars": total_cars,
+            "car_index": car.car_index,
+            "car_type_enc": encoders["car_type"].index(car.car_type),
+            "car_max_load_kg": car.max_load_kg,
+            "car_current_load_kg": car.current_load_kg,
+            "car_remaining_capacity_m3": car.remaining_capacity_m3,
+            "distance_from_hazmat_car": car.distance_from_hazmat_car,
+            "position_in_car_enc": encoders["position_in_car"].index(car.position),
+        }
+        x = [feat[name] for name in feature_names]
+        score = _clamp01(predict_raw(x))
+        remaining_capacity_kg = car.max_load_kg - car.current_load_kg
+        results.append({
+            "car": car,
+            "score": round(score, 4),
+            "capacity_ok": remaining_capacity_kg >= cargo_weight_kg,
+        })
 
-    grouped = [new_order]
-    for other in pool:
-        if other.order_id == new_order.order_id:
-            continue
-        other_origin, _ = nearest_freight_node(other.origin_lat, other.origin_lng)
-        other_dest, _ = nearest_freight_node(other.dest_lat, other.dest_lng)
-        if (
-            other_origin.name == origin_node.name
-            and other_dest.name == dest_node.name
-            and window_start <= other.desired_date <= window_end
-        ):
-            grouped.append(other)
-
-    total_weight = sum(o.weight_ton for o in grouped)
-
-    if total_weight >= MIN_CONSOLIDATION_TON:
-        return ConsolidationResult(
-            True,
-            f"유사 조건 화주 {len(grouped) - 1}건과 결합 시 철도 이용 가능 "
-            f"(합산 {total_weight:.1f}톤 — 컨테이너 공유 적재)",
-            origin_node.name,
-            dest_node.name,
-            [o.order_id for o in grouped],
-            total_weight,
-        )
-
-    return ConsolidationResult(
-        False,
-        f"현재 풀 내 결합 가능 화주 기준 합산 {total_weight:.1f}톤 "
-        f"(최소 결합 기준 {MIN_CONSOLIDATION_TON}톤 미달) — 철도 이용 불가, 트럭/퀵/KTX특송만 비교",
-        origin_node.name,
-        dest_node.name,
-        [o.order_id for o in grouped],
-        total_weight,
-    )
+    results.sort(key=lambda r: r["score"], reverse=True)
+    return results[:top_n]

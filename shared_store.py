@@ -1,119 +1,67 @@
-# -*- coding: utf-8 -*-
-"""
-화주용 예약 확정(app.py) → 트럭기사 앱 / 관제센터가 참조하는 세션 간 공유 저장소.
+# 소량 화물 운송수단 비교 & Door-to-Door 조율 플랫폼 (프로토타입)
 
-st.cache_resource로 반환하는 객체는 세션(브라우저 탭)이 아니라 앱 프로세스
-전체에서 싱글턴으로 공유된다. 별도 DB 없이 데모 수준의 "세션 간 데이터 공유"를
-구현하기 위한 선택.
+화주의 견적 비교(트럭/퀵/KTX특송/철도 통합운송)부터, 철도 통합운송 예약 확정 이후의
+실시간 추적·트럭기사 배차·관제센터 KPI까지 이어지는 통합 프로토타입입니다.
 
-⚠️ 한계: Streamlit Cloud에서 앱이 유휴 상태로 슬립하거나 재배포되면 프로세스가
-   재시작되면서 인메모리 데이터가 초기화된다 — 영속성이 필요하면 SQLite 파일이나
-   외부 DB(Supabase 등)로 교체가 필요하다 (TODO, 데모 스코프에서는 보류).
-⚠️ "실시간"은 웹소켓 push가 아니라 화면을 다시 그릴 때(rerun) 최신 상태를
-   읽어오는 폴링 방식이다. 각 페이지에 새로고침 버튼을 뒀고, 자동 주기 갱신이
-   필요하면 Streamlit 1.37+의 st.fragment(run_every=...)로 교체 가능 (TODO).
-"""
+원래 두 개의 별도 프로젝트였습니다.
+- **Freight** (본 리포의 메인 구조/로직) — 소량화물 통합 견적 비교 엔진
+- **Korail Relai** (팀원 아이디어, 화면 구성 논리 활용) — 예약 후 실시간 추적/트럭기사/관제센터 화면
 
-import uuid
-from datetime import datetime
-from threading import Lock
+병합하면서 Relai 쪽의 mock(random) 데이터는 전부 제거하고, Freight 엔진이 산출하는
+실제 데이터를 공유 저장소(`shared_store.py`)로 넘겨 후단 화면이 그 데이터를 그대로
+쓰도록 연결했습니다.
 
-import streamlit as st
+## 실행 방법
 
-# 화주 door-to-door 여정의 8단계 — 예약시각~도착예정시각 사이 경과 비율로
-# 결정론적으로 계산한다 (random 사용 안 함).
-STAGE_LABELS = [
-    "화주 공장 출발",
-    "육상 트럭 이동중 (첫마일)",
-    "화물역(CY) 도착",
-    "철도 상차 대기",
-    "철도 운송중",
-    "목적지 화물역 도착",
-    "육상 트럭 배송중 (막판마일)",
-    "최종 목적지 도착",
-]
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+```
 
+API 키는 코드에 직접 넣지 말고 `.streamlit/secrets.toml`에 넣으세요:
 
-@st.cache_resource
-def _get_store():
-    return {"shipments": {}, "lock": Lock()}
+```toml
+GOOGLE_MAPS_API_KEY = "..."
+KAKAO_REST_API_KEY = "..."
+GEMINI_API_KEY = "..."
+```
 
+## 화면 구성
 
-def add_shipment(**fields) -> str:
-    """예약 확정 시 화물 1건을 스토어에 기록하고 화물ID를 반환.
+- `app.py` — 화주용 견적 비교(트럭/퀵/KTX특송/철도 통합운송) + 철도 통합운송 예약 확정
+- `pages/1_화주용_실시간추적.py` — 예약 확정된 화물의 door-to-door 진행 상황 추적
+- `pages/2_트럭기사용_앱.py` — 배차 안내 + 복귀 화물(공차 방지) 매칭
+- `pages/3_관제센터.py` — 전체 예약 현황, 탄소절감·리드타임 등 실측 KPI
+- `pages/4_화차배치추천.py` — 서모게이트 ML 모델(LightGBM) 기반 화물-화차 매칭 추천
 
-    필수로 기대하는 키(app.py 쪽에서 채워 넣음):
-      화물종류, 출발지주소, 도착지주소, 출발화물역, 도착화물역, 중량톤,
-      예약시각, 희망출발시각, 도착예정시각, 요금원,
-      GWP(kgCO2eq), GWP절감(kgCO2eq대비트럭), 결합화주ID목록, 열차번호, 시각표출처
-    """
-    store = _get_store()
-    shipment_id = fields.pop("화물ID", None) or f"KRL-{uuid.uuid4().hex[:8].upper()}"
-    record = {"화물ID": shipment_id, **fields}
-    with store["lock"]:
-        store["shipments"][shipment_id] = record
-    return shipment_id
+## 파일 구조 (엔진, Freight 원본 유지)
 
+- `geocode.py` — Google Geocoding API (주소 → 좌표)
+- `road_cost.py` — 카카오맵 API 기반 트럭 소요시간(실시간) + 트럭/퀵/드레이지 요금 근사
+- `rail_freight_nodes.py` — 화물역 좌표, 철도 근사 상수 (실제 화물열차 시각표 데이터 기반 선정, 7개 역)
+- `rail_schedule.py` — 실제 화물열차 시각표(data.go.kr) 파싱 및 열차 조회
+- `rail_cost.py` — 화물역 간 소요시간/운임 계산
+- `intermodal.py` — 첫마일(트럭)+철도+막판마일(트럭) door-to-door 계산
+- `ktx_tucking.py` — KTX특송 규격/노선/취급역 판정
+- `consolidation.py` — 소량 화물 통합(규칙 기반 그룹핑) 핵심 로직
+- `cargo.py` — 화물 종류 분류(키워드) 및 요금 할증/수단 제한
+- `emission.py` — 배출량(GWP/PM) 및 탄소 마일리지 계산
+- `gemini_assist.py` — 자연어 입력 파싱 + 결과 설명 생성 + 화물종류 분류 (역할 제한적으로 사용)
+- `freight_train_schedule.csv` — 코레일 실데이터 "2026년도 화물열차 설정 현황"(2026-08-01 기준, 사용자 제공) 가공본. 시발역→종착역 직행 단위 202건
 
-def read_shipments() -> list[dict]:
-    """전체 예약 목록 조회 (최신 등록순)."""
-    store = _get_store()
-    with store["lock"]:
-        rows = list(store["shipments"].values())
-    return sorted(rows, key=lambda r: r.get("예약시각") or datetime.min, reverse=True)
+## 파일 구조 (신규 — 병합 시 추가)
 
+- `shared_store.py` — 화주 예약(app.py) → 트럭기사 앱/관제센터가 참조하는 세션 간 공유 저장소.
+  `st.cache_resource` 기반 인메모리 저장이라 프로세스 재시작 시 초기화됨 (데모 스코프의 한계, TODO: 영속화)
+- `pages/*.py` — Relai의 화면 구성 논리를 가져오되, 데이터는 전부 `shared_store`/Freight 엔진에서 실측으로 가져옴
+- `car_assignment.py`, `car_assignment_model.json` — 화차 배치 추천용 서모게이트 LightGBM 모델(사용자가 별도 학습, JS→Python 이식) + mock 화차 편성 생성기
+- `utils/data.py` — STATIONS는 `rail_freight_nodes.FREIGHT_NODES`를 그대로 import (중복 정의 방지)
 
-def get_shipment(shipment_id: str) -> dict | None:
-    store = _get_store()
-    with store["lock"]:
-        return store["shipments"].get(shipment_id)
+## 알려진 한계 (기존 Freight + 병합 과정에서 추가된 것)
 
-
-def current_stage_idx(record: dict) -> int:
-    """화물의 현재 진행 단계(8단계 중 인덱스)를 계산.
-
-    두 가지 방식이 있다.
-
-    1) 시각표출처가 'real'이고 철도출발/도착시각이 있으면 — 공공데이터
-       화물열차 시각표(freight_train_schedule.csv)에서 나온 실제 열차
-       출발/도착 시각을 그대로 경계값으로 써서 지금이 "철도 운송중"
-       구간에 있는지 정확히 판정한다. random이나 선형근사가 아니라
-       실제 시각표 데이터에 근거한 판정이다.
-    2) 시각표에 매칭되는 열차가 없어(순천-포항처럼 직행 노선 없는 조합)
-       추정치로 폴백한 예약이면, 정밀한 열차 출발/도착 경계를 알 수
-       없으므로 희망출발시각~도착예정시각 사이 경과 비율로 근사한다.
-       이 경우도 여전히 "화물이 정말 그 단계에 있다"는 실측치는 아니라
-       시간 흐름을 선형 근사한 시뮬레이션이라는 한계가 있다.
-    """
-    now = datetime.now()
-    t_start = record.get("희망출발시각")
-    t_eta = record.get("도착예정시각")
-    if not t_start or not t_eta:
-        return 0
-
-    if now < t_start:
-        return 0  # 아직 출발 전 (화주 공장 출발 대기)
-    if now >= t_eta:
-        return len(STAGE_LABELS) - 1  # 최종 목적지 도착
-
-    rail_dep = record.get("철도출발시각")
-    rail_arr = record.get("철도도착시각")
-    t1 = record.get("첫마일완료시각")
-    t4 = record.get("막판마일시작시각")
-
-    if record.get("시각표출처") == "real" and rail_dep and rail_arr and t1 and t4:
-        boundaries = [t_start, t1, rail_dep, rail_arr, t4, t_eta]
-        # boundaries[i] <= now < boundaries[i+1] 인 구간에 매핑
-        # STAGE_LABELS 인덱스: 1=첫마일이동중, 3=철도상차대기, 4=철도운송중,
-        # 6=막판마일배송중 (2:CY도착, 5:목적지도착은 경계 순간에만 존재하는
-        # 시점이라 인접 구간에 흡수)
-        stage_for_segment = [1, 3, 4, 6]
-        for i in range(len(boundaries) - 1):
-            if boundaries[i] <= now < boundaries[i + 1]:
-                return stage_for_segment[i]
-        return 6
-
-    # ── 폴백: 실제 시각표 매칭 실패(추정치) → 경과 비율 선형 근사 ──
-    ratio = (now - t_start).total_seconds() / (t_eta - t_start).total_seconds()
-    ratio = min(max(ratio, 0.0), 0.999)
-    return min(int(ratio * len(STAGE_LABELS)), len(STAGE_LABELS) - 1)
+- `freight_train_schedule.csv`는 2026-08-01 기준 스냅샷 — 실시간 시각표 아님, "확정 시각표"로 취급 금지 (그래도 이전 2025-04-14보다 훨씬 최신)
+- 데모용 가상 화주 풀(`get_mock_pool`)은 실제 누적 주문이 아닌 하드코딩 예시로 남아 있음 (TODO: 예약 확정 건이 쌓이면 이 풀 자체를 `shared_store`로 대체하는 게 다음 단계)
+- 트럭/화차 개별 실시간 GPS는 실제 텔레매틱스 연동 없이는 구현 근거가 없어 관제센터에서 제외 — 대신 화물역별 예약 건수 집계로 대체
+- "실시간"은 웹소켓 push가 아니라 각 페이지 새로고침(폴링) 방식. 자동 주기 갱신이 필요하면 `st.fragment(run_every=...)`로 교체 가능 (TODO, 아직 미적용)
+- 트럭 단독/퀵서비스/KTX특송 예약 건은 화물역 환적 구간이 없어 실시간 추적·트럭기사 연계 대상에서 제외됨 (철도 통합운송 건만 후단 화면과 연동)
+- 화차 배치 추천의 예측 모델 자체는 실제 학습된 것이지만, 학습 라벨(suitability_score)은 코레일 실제 배치 규정이 아닌 자체 정의 합성 데이터. 화차 편성(개별 화차 종류/적재량/위치)도 실제 데이터가 없어 열차번호 기반 결정론적 mock으로 생성 (car_assignment.generate_mock_train_composition)

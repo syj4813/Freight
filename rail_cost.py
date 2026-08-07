@@ -1,91 +1,128 @@
 # -*- coding: utf-8 -*-
-"""철도(화물역 간) 구간 요금/시간 계산 — 실제 시각표 우선, 없으면 추정."""
+"""
+철도 통합운송 door-to-door 계산.
 
-import math
-from datetime import datetime
+첫마일(트럭) 도착 시각을 기준으로 실제 화물열차 시각표에서 다음 열차를
+찾고, 그 열차의 실제 도착시각에 막판마일(트럭) 소요시간을 더해 최종
+도착예정시각을 계산한다. 실제 시각표에 매칭되는 열차가 없으면
+거리/평균속도 기반 추정치로 자동 폴백한다 (rail_cost.estimate_rail_leg).
+"""
 
-from rail_freight_nodes import (
-    FREIGHT_NODES,
-    AVG_FREIGHT_SPEED_KMH,
-    RAIL_TON_KM_RATE_WON,
-    TERMINAL_HANDLING_MIN,
-    MIN_BILLING_TON,
-    RAIL_HANDLING_FEE_WON,
-    FreightNode,
-)
-from rail_schedule import find_next_departure
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 
-
-def _haversine_km(lat1, lng1, lat2, lng2) -> float:
-    R = 6371.0
-    p1, p2 = math.radians(lat1), math.radians(lat2)
-    dphi = math.radians(lat2 - lat1)
-    dlambda = math.radians(lng2 - lng1)
-    a = math.sin(dphi / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dlambda / 2) ** 2
-    return 2 * R * math.asin(math.sqrt(a))
+from rail_cost import nearest_freight_node, estimate_rail_leg
+from rail_freight_nodes import TERMINAL_HANDLING_MIN
+from road_cost import get_road_distance_duration, estimate_drayage_fare
+from emission import calculate_emission, TransportMode
 
 
-def nearest_freight_node(lat: float, lng: float) -> tuple[FreightNode, float]:
-    """화주 위치에서 가장 가까운 화물역과 거리(km) 반환."""
-    best, best_dist = None, float("inf")
-    for node in FREIGHT_NODES:
-        d = _haversine_km(lat, lng, node.lat, node.lng)
-        if d < best_dist:
-            best, best_dist = node, d
-    return best, best_dist
+@dataclass
+class IntermodalResult:
+    departure_dt: datetime
+    arrival_dt: datetime
+    total_duration_min: int
+    total_fare_won: int
+    total_gwp_kg_co2e: float
+    total_pm_kg: float
+    electrified: bool
+    schedule_source: str  # 'real' | 'estimated'
+    train_no: str | None
+    origin_node_name: str
+    dest_node_name: str
+    origin_node_lat: float
+    origin_node_lng: float
+    dest_node_lat: float
+    dest_node_lng: float
+    first_mile_km: float
+    rail_km: float
+    last_mile_km: float
+    first_mile_path: list[tuple[float, float]]
+    last_mile_path: list[tuple[float, float]]
+    # ── 단계(stage) 판정용 중간 타임스탬프 ──
+    # schedule_source == 'real'일 때만 rail_departure_dt가 채워진다(실제
+    # CSV 시각표 기반). 'estimated'면 None — 이 경우 하류(shared_store)에서는
+    # 정밀 단계 판정을 포기하고 예약~도착 경과비율 방식으로 폴백해야 한다.
+    station_ready_dt: datetime  # 첫마일 트럭 도착 + 상차처리 완료 시각
+    rail_departure_dt: datetime | None  # 실제 열차 출발시각 (real일 때만)
+    rail_arrival_dt: datetime  # 열차 도착시각 (real이면 실제, 아니면 추정)
+    station_release_dt: datetime  # 하차처리 완료 + 막판마일 트럭 출발 시각
 
 
-def estimate_rail_leg(
-    origin_node: FreightNode,
-    dest_node: FreightNode,
+def estimate_intermodal(
+    origin_lat: float,
+    origin_lng: float,
+    dest_lat: float,
+    dest_lng: float,
     weight_ton: float,
-    departure_after: datetime,
-) -> dict:
-    """화물역 간 구간 소요시간/운임 + 전철화 여부 판정.
+    departure_dt: datetime,
+) -> IntermodalResult:
+    origin_node, _ = nearest_freight_node(origin_lat, origin_lng)
+    dest_node, _ = nearest_freight_node(dest_lat, dest_lng)
 
-    소요시간은 rail_schedule.py의 실제 시각표에서 먼저 찾고, 매칭되는
-    열차가 없으면(예: 순천-포항처럼 직행 노선이 없는 조합) 거리/평균속도
-    기반 추정치로 폴백한다. 'schedule_source' 필드로 어느 쪽인지 구분.
-
-    운임은 시각표 데이터에 없는 정보라 항상 추정치 — 거리 × 톤·km단가 ×
-    청구중량(최저운임 톤수 적용) + 상하차 취급수수료(양단 2회).
-    """
-    if origin_node.name == dest_node.name:
-        return {
-            "distance_km": 0, "duration_min": 0, "fare_won": 0, "electrified": True,
-            "schedule_source": "estimated", "departure_dt": None, "arrival_dt": None, "train_no": None,
-        }
-
-    dist_km = _haversine_km(origin_node.lat, origin_node.lng, dest_node.lat, dest_node.lng)
-    electrified = origin_node.electrified and dest_node.electrified
-
-    schedule = find_next_departure(
-        origin_node.schedule_station, dest_node.schedule_station, departure_after
+    # 첫마일: 화주 출발지 -> 가장 가까운 출발 화물역 (카카오맵 실제 도로 데이터)
+    first_mile = get_road_distance_duration(origin_lng, origin_lat, origin_node.lng, origin_node.lat)
+    # 화물역 도착 후 상차 처리 시간을 더해 "열차 탑승 가능 시각" 산출
+    ready_at_origin_station = (
+        departure_dt
+        + timedelta(minutes=first_mile["duration_min"])
+        + timedelta(minutes=TERMINAL_HANDLING_MIN)
     )
 
-    if schedule is not None:
-        duration_min = schedule["duration_min"]
-        schedule_source = "real"
-        departure_dt = schedule["departure_dt"]
-        arrival_dt = schedule["arrival_dt"]
-        train_no = schedule["train_no"]
+    rail_leg = estimate_rail_leg(origin_node, dest_node, weight_ton, ready_at_origin_station)
+
+    if rail_leg["schedule_source"] == "real":
+        rail_arrival_dt = rail_leg["arrival_dt"]
     else:
-        duration_min = round((dist_km / AVG_FREIGHT_SPEED_KMH) * 60 + TERMINAL_HANDLING_MIN * 2)
-        schedule_source = "estimated"
-        departure_dt = None
-        arrival_dt = None
-        train_no = None
+        rail_arrival_dt = ready_at_origin_station + timedelta(minutes=rail_leg["duration_min"])
 
-    billing_weight_ton = max(weight_ton, MIN_BILLING_TON)
-    fare = dist_km * RAIL_TON_KM_RATE_WON * billing_weight_ton + RAIL_HANDLING_FEE_WON * 2
+    # 도착 화물역 하차 처리 시간을 더한 뒤 막판마일 트럭 출발
+    ready_for_last_mile = rail_arrival_dt + timedelta(minutes=TERMINAL_HANDLING_MIN)
+    last_mile = get_road_distance_duration(dest_node.lng, dest_node.lat, dest_lng, dest_lat)
+    final_arrival_dt = ready_for_last_mile + timedelta(minutes=last_mile["duration_min"])
 
-    return {
-        "distance_km": round(dist_km, 1),
-        "duration_min": duration_min,
-        "fare_won": round(fare, -3),
-        "electrified": electrified,
-        "schedule_source": schedule_source,
-        "departure_dt": departure_dt,
-        "arrival_dt": arrival_dt,
-        "train_no": train_no,
-    }
+    first_mile_fare = estimate_drayage_fare(first_mile["distance_km"], weight_ton)
+    last_mile_fare = estimate_drayage_fare(last_mile["distance_km"], weight_ton)
+    total_fare = first_mile_fare + rail_leg["fare_won"] + last_mile_fare
+    total_duration = round((final_arrival_dt - departure_dt).total_seconds() / 60)
+
+    rail_mode = TransportMode.RAIL_FREIGHT_ELECTRIC if rail_leg["electrified"] else TransportMode.RAIL_FREIGHT_DIESEL
+    rail_emission = calculate_emission(rail_mode, rail_leg["distance_km"], weight_ton)
+    first_mile_emission = calculate_emission(TransportMode.TRUCK_LORRY_3_5_7_5T, first_mile["distance_km"], weight_ton)
+    last_mile_emission = calculate_emission(TransportMode.TRUCK_LORRY_3_5_7_5T, last_mile["distance_km"], weight_ton)
+
+    total_gwp = (
+        rail_emission["gwp_kg_co2e"]
+        + first_mile_emission["gwp_kg_co2e"]
+        + last_mile_emission["gwp_kg_co2e"]
+    )
+    total_pm = (
+        rail_emission["pm_kg"] + first_mile_emission["pm_kg"] + last_mile_emission["pm_kg"]
+    )
+
+    return IntermodalResult(
+        departure_dt=departure_dt,
+        arrival_dt=final_arrival_dt,
+        total_duration_min=total_duration,
+        total_fare_won=round(total_fare, -3),
+        total_gwp_kg_co2e=round(total_gwp, 3),
+        total_pm_kg=round(total_pm, 6),
+        electrified=rail_leg["electrified"],
+        schedule_source=rail_leg["schedule_source"],
+        train_no=rail_leg["train_no"],
+        origin_node_name=origin_node.name,
+        dest_node_name=dest_node.name,
+        origin_node_lat=origin_node.lat,
+        origin_node_lng=origin_node.lng,
+        dest_node_lat=dest_node.lat,
+        dest_node_lng=dest_node.lng,
+        first_mile_km=first_mile["distance_km"],
+        rail_km=rail_leg["distance_km"],
+        last_mile_km=last_mile["distance_km"],
+        first_mile_path=first_mile["path"],
+        last_mile_path=last_mile["path"],
+        station_ready_dt=ready_at_origin_station,
+        rail_departure_dt=rail_leg["departure_dt"],  # real이 아니면 None
+        rail_arrival_dt=rail_arrival_dt,
+        station_release_dt=ready_for_last_mile,
+    )
