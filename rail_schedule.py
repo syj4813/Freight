@@ -1,101 +1,128 @@
 # -*- coding: utf-8 -*-
 """
-이동경로 지도 시각화 (pydeck).
+코레일 "2026년도 화물열차 설정 현황"(2026-08-01 기준) 파싱.
 
-트럭 구간(직송/첫마일/막판마일)은 카카오맵이 실제로 반환한 도로 경로
-좌표를 그대로 그려서 실제 도로를 따라가는 곡선으로 표시한다. 좌표가
-주어지지 않으면(예: API 실패) 시작-끝 직선으로 폴백한다.
+⚠️ 2026-07-29(초판)에는 data.go.kr 공공데이터(2025-04-14 스냅샷, 정차사유
+   기반 stop-level 데이터)를 썼으나, 2026-08-07 사용자가 실제 코레일
+   내부자료(2026-08-01 기준 설정열차 현황)를 제공해 이걸로 교체함.
+   새 데이터는 시발역→종착역 직행 단위로 이미 정리돼 있어(중간 정차역
+   재구성 불필요) 이전보다 파싱이 단순해졌고, 날짜도 훨씬 최신이다.
+⚠️ 그래도 특정 시점 스냅샷(8/1 기준)인 건 동일 — 임시열차 편성, 선로
+   사정 등으로 실제 운행은 바뀔 수 있어 "확정 시각표"가 아닌 "참고
+   시각표"로 취급해야 한다.
+⚠️ "부산신항"으로 표기된 역명은 rail_freight_nodes.py의
+   schedule_station="부산항"과 맞추기 위해 추출 시점에 "부산항"으로
+   통일함.
+⚠️ 원본에서 "변압기" 등 비정기·특수 화물열차(고정된 요일 패턴이 없는
+   임시편성)는 요일 정보가 없어 이 CSV에서 제외했다 — 정기편성만 포함.
 
-⚠️ 철도 구간은 실제 선로 좌표 데이터가 없어 역-역 직선으로 표시한다 —
-   실제 선로 곡률과는 다르다.
+컬럼: 열차번호, 품목, 구분, 시발역, 출발시각, 종착역, 도착시각, 운행선, 운행요일
 """
 
-import pydeck as pdk
+import csv
+from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta
+from pathlib import Path
 
-TRUCK_COLOR = [255, 140, 0]
-DRAYAGE_COLOR = [34, 139, 34]
-RAIL_COLOR = [30, 90, 220]
-ORIGIN_COLOR = [0, 102, 255]
-DEST_COLOR = [220, 20, 60]
-NODE_COLOR = [34, 139, 34]
+CSV_PATH = Path(__file__).parent / "freight_train_schedule.csv"
 
-
-def _to_pydeck_path(points: list[tuple[float, float]]) -> list[list[float]]:
-    """[(lat, lng), ...] -> pydeck이 요구하는 [[lng, lat], ...] 변환."""
-    return [[lng, lat] for lat, lng in points]
+# Python date.weekday(): 0=월요일 ... 6=일요일
+_WEEKDAY_CHARS = ["월", "화", "수", "목", "금", "토", "일"]
 
 
-def build_route_map(
-    origin_lat: float,
-    origin_lng: float,
-    dest_lat: float,
-    dest_lng: float,
-    truck_only_path: list[tuple[float, float]] | None = None,
-    origin_node: tuple[float, float, str] | None = None,
-    dest_node: tuple[float, float, str] | None = None,
-    first_mile_path: list[tuple[float, float]] | None = None,
-    last_mile_path: list[tuple[float, float]] | None = None,
-) -> pdk.Deck:
-    """origin_node/dest_node를 주면 철도 경로도 함께 표시.
-    *_path는 카카오맵 실제 도로 좌표 [(lat, lng), ...] — 없으면 직선 폴백."""
-    markers = [
-        {"lat": origin_lat, "lng": origin_lng, "label": "출발지", "color": ORIGIN_COLOR},
-        {"lat": dest_lat, "lng": dest_lng, "label": "도착지", "color": DEST_COLOR},
-    ]
+def _parse_service_days(text: str) -> set[str]:
+    if text == "매일":
+        return set(_WEEKDAY_CHARS)
+    # "일,화,수,목,금,토" 형태 — 쉼표 등 요일이 아닌 문자가 섞여도
+    # day_char in service_days 판정에는 영향 없음.
+    return set(text)
 
-    truck_pts = truck_only_path or [(origin_lat, origin_lng), (dest_lat, dest_lng)]
-    paths = [
-        {"path": _to_pydeck_path(truck_pts), "color": TRUCK_COLOR, "label": "트럭 직송"},
-    ]
 
-    if origin_node and dest_node:
-        on_lat, on_lng, on_name = origin_node
-        dn_lat, dn_lng, dn_name = dest_node
-        markers.append({"lat": on_lat, "lng": on_lng, "label": on_name, "color": NODE_COLOR})
-        markers.append({"lat": dn_lat, "lng": dn_lng, "label": dn_name, "color": NODE_COLOR})
+@dataclass
+class TrainMatch:
+    train_no: str
+    departure_time: time
+    arrival_time: time
+    overnight: bool  # 도착시각이 다음날로 넘어가는지 (출발시각보다 이르면 다음날로 간주)
+    service_days: set[str]
+    line: str
 
-        fm_pts = first_mile_path or [(origin_lat, origin_lng), (on_lat, on_lng)]
-        lm_pts = last_mile_path or [(dn_lat, dn_lng), (dest_lat, dest_lng)]
 
-        paths.append({"path": _to_pydeck_path(fm_pts), "color": DRAYAGE_COLOR, "label": "첫마일(트럭)"})
-        paths.append({"path": [[on_lng, on_lat], [dn_lng, dn_lat]], "color": RAIL_COLOR, "label": "철도 (직선 근사)"})
-        paths.append({"path": _to_pydeck_path(lm_pts), "color": DRAYAGE_COLOR, "label": "막판마일(트럭)"})
+_rows_cache: list[dict] | None = None
 
-    path_layer = pdk.Layer(
-        "PathLayer",
-        data=paths,
-        get_path="path",
-        get_color="color",
-        get_width=5,
-        width_min_pixels=3,
-        pickable=True,
-    )
-    marker_layer = pdk.Layer(
-        "ScatterplotLayer",
-        data=markers,
-        get_position=["lng", "lat"],
-        get_fill_color="color",
-        get_radius=6000,
-        pickable=True,
-    )
-    text_layer = pdk.Layer(
-        "TextLayer",
-        data=markers,
-        get_position=["lng", "lat"],
-        get_text="label",
-        get_size=14,
-        get_color=[20, 20, 20],
-        get_pixel_offset=[0, -14],
-    )
 
-    view_state = pdk.ViewState(
-        latitude=(origin_lat + dest_lat) / 2,
-        longitude=(origin_lng + dest_lng) / 2,
-        zoom=6.2,
-    )
+def _get_rows() -> list[dict]:
+    global _rows_cache
+    if _rows_cache is None:
+        with open(CSV_PATH, encoding="utf-8") as f:
+            _rows_cache = list(csv.DictReader(f))
+    return _rows_cache
 
-    return pdk.Deck(
-        layers=[path_layer, marker_layer, text_layer],
-        initial_view_state=view_state,
-        tooltip={"text": "{label}"},
-    )
+
+def find_direct_trains(origin_station: str, dest_station: str) -> list[TrainMatch]:
+    """origin에서 dest로 직행하는 열차 목록 (요일 필터 전).
+
+    새 데이터는 이미 시발역→종착역 단위로 정리돼 있어, 이전처럼
+    같은 열차번호의 여러 정차역 중 순서를 재구성할 필요가 없다.
+    """
+    results = []
+    for r in _get_rows():
+        if r["시발역"] != origin_station or r["종착역"] != dest_station:
+            continue
+        dep_t = datetime.strptime(r["출발시각"], "%H:%M:%S").time()
+        arr_t = datetime.strptime(r["도착시각"], "%H:%M:%S").time()
+        results.append(TrainMatch(
+            train_no=r["열차번호"],
+            departure_time=dep_t,
+            arrival_time=arr_t,
+            overnight=arr_t < dep_t,
+            service_days=_parse_service_days(r["운행요일"]),
+            line=r["운행선"],
+        ))
+    return results
+
+
+def find_next_departure(
+    origin_station: str, dest_station: str, after_dt: datetime, search_days: int = 7
+) -> dict | None:
+    """after_dt 이후 가장 빠르게 출발하는 실제 열차. 없으면 None.
+
+    ⚠️ 환승(중간에 다른 열차로 갈아타는 경로)은 고려하지 않음 — 직행
+    열차만 찾음. 실제로는 화물도 중계 운송(다른 열차로 환적)이 흔하지만
+    이 근사에서는 단순화함.
+    """
+    candidates = find_direct_trains(origin_station, dest_station)
+    if not candidates:
+        return None
+
+    best: TrainMatch | None = None
+    best_departure_dt: datetime | None = None
+
+    for day_offset in range(search_days):
+        check_date = after_dt.date() + timedelta(days=day_offset)
+        day_char = _WEEKDAY_CHARS[check_date.weekday()]
+        for c in candidates:
+            if day_char not in c.service_days:
+                continue
+            dep_dt = datetime.combine(check_date, c.departure_time)
+            if dep_dt < after_dt:
+                continue
+            if best_departure_dt is None or dep_dt < best_departure_dt:
+                best_departure_dt = dep_dt
+                best = c
+        if best is not None:
+            break
+
+    if best is None or best_departure_dt is None:
+        return None
+
+    arr_date = best_departure_dt.date() + timedelta(days=1 if best.overnight else 0)
+    arrival_dt = datetime.combine(arr_date, best.arrival_time)
+
+    return {
+        "train_no": best.train_no,
+        "departure_dt": best_departure_dt,
+        "arrival_dt": arrival_dt,
+        "duration_min": round((arrival_dt - best_departure_dt).total_seconds() / 60),
+        "line": best.line,
+    }
