@@ -11,6 +11,7 @@
      명확히 구분 표시
 """
 
+import glob
 from datetime import datetime, time, timedelta
 
 import streamlit as st
@@ -549,20 +550,43 @@ if st.session_state.get("show_comparison"):
 
 st.divider()
 st.subheader("후단 서비스 바로가기")
+
+
+def _resolve_page(order_prefix: str) -> str | None:
+    """pages/ 폴더에서 실제 파일을 찾아 경로를 반환.
+
+    ⚠️ 코드에 한글 경로를 문자열로 직접 박아두면, macOS에서 git이 파일명을
+    유니코드 정규화(NFC/NFD)하는 방식에 따라 실제 디스크상의 바이트열과
+    코드 속 문자열이 달라 st.page_link()가 "파일을 못 찾음" 에러를 내는
+    경우가 있다. glob으로 실행 시점에 실제 경로를 찾아 쓰면 이 문제를
+    피할 수 있다.
+    """
+    matches = sorted(glob.glob(f"pages/{order_prefix}_*.py"))
+    return matches[0] if matches else None
+
+
 nav1, nav2, nav3, nav4 = st.columns(4)
 with nav1:
     st.markdown("#### 📦 화주용 실시간추적")
     st.caption("예약된 화물의 door-to-door 진행 상황 추적")
-    st.page_link("pages/1_화주용_실시간추적.py", label="열기 →", icon="📦")
+    page = _resolve_page("1")
+    if page:
+        st.page_link(page, label="열기 →", icon="📦")
 with nav2:
     st.markdown("#### 🚚 트럭기사용 앱")
     st.caption("배차 안내, 공차 방지 복귀화물 매칭")
-    st.page_link("pages/2_트럭기사용_앱.py", label="열기 →", icon="🚚")
+    page = _resolve_page("2")
+    if page:
+        st.page_link(page, label="열기 →", icon="🚚")
 with nav3:
     st.markdown("#### 🛰️ 관제센터")
     st.caption("전체 예약 현황, 탄소절감·리드타임 KPI")
-    st.page_link("pages/3_관제센터.py", label="열기 →", icon="🛰️")
+    page = _resolve_page("3")
+    if page:
+        st.page_link(page, label="열기 →", icon="🛰️")
 with nav4:
     st.markdown("#### 🚃 화차 배치 추천")
     st.caption("서모게이트 ML 모델로 화물-화차 매칭")
-    st.page_link("pages/4_화차배치추천.py", label="열기 →", icon="🚃")
+    page = _resolve_page("4")
+    if page:
+        st.page_link(page, label="열기 →", icon="🚃")
