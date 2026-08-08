@@ -1,10 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-소량 화물 운송수단 비교 플랫폼 (프로토타입)
+화물 운송수단 비교 플랫폼 (프로토타입)
+
+⚠️ 2026-08-08부터 취급 범위를 축소함: 퀵서비스(30kg 상한)·KTX특송(2~15kg
+   상한)은 애초에 소형화물 전용이라, "트럭 vs 철도 통합운송" 비교라는
+   서비스 방향과 맞지 않아 제거했습니다. 이제 이 계산기는 500kg 이상
+   화물의 트럭 단독 운송과 철도 통합운송(가능 시)만 비교합니다.
 
 화주가 화물 정보를 입력하면:
-  1. 트럭 단독 / 퀵서비스 / KTX특송(규격 충족 시) / 철도 통합운송(가능 시)
-     을 비교표로 제시
+  1. 트럭 단독 vs 철도 통합운송(가능 시)을 비교표로 제시
   2. 철도 통합운송은 가상 화주 풀(pool)과의 결합 가능 여부를 백그라운드에서
      판정하고, 화주에게는 결과 메시지만 노출
   3. 실시간 데이터(카카오맵 소요시간 등)와 추정치(화물열차 운임 등)를
@@ -19,14 +23,12 @@ from geocode import geocode_address, geocode_to_formatted_address
 from road_cost import (
     get_road_distance_duration,
     estimate_truck_fare,
-    estimate_quick_fare,
     select_truck_tier,
 )
 from rail_freight_nodes import CONTAINER_MAX_TON
-from ktx_tucking import check_ktx_tucking_eligible, KTX_TUCKING_STATIONS
 from consolidation import ShipperOrder, evaluate_consolidation
 from emission import calculate_truck_vs_rail_savings, calculate_carbon_mileage, calculate_tree_equivalent
-from cargo import classify_cargo_type, apply_surcharge, is_mode_restricted, CargoCategory
+from cargo import classify_cargo_type, apply_surcharge, CargoCategory
 from gemini_assist import classify_cargo_category as gemini_classify_cargo
 from gemini_assist import parse_free_text_order, explain_comparison, explain_carbon_savings
 from intermodal import estimate_intermodal
@@ -38,8 +40,6 @@ st.set_page_config(page_title="소량 화물 운송수단 비교", layout="wide"
 
 MODE_ICONS = {
     "트럭 단독": "🚛",
-    "퀵서비스": "🛵",
-    "KTX특송": "🚄",
     "철도 통합운송": "🚆",
 }
 
@@ -120,14 +120,14 @@ def get_mock_pool() -> list[ShipperOrder]:
 
 
 st.title("소량 화물 운송수단 비교")
-st.caption("트럭 · 퀵서비스 · KTX특송 · 철도 통합운송 비교 프로토타입")
+st.caption("트럭 vs 철도 통합운송 비교 프로토타입 (500kg 이상 화물)")
 
 # ── 자동입력: 인터페이스 사용이 어려운 화주를 위한 자연어 입력 ──
 _defaults = {
     "f_origin": "서울특별시 중구 세종대로",
     "f_dest": "부산광역시 동구 중앙대로",
     "f_cargo": "전자부품",
-    "f_weight": 8.0,
+    "f_weight": 800.0,
     "f_size": 40.0,
     "f_date": today_kst(),
     "f_time": time(9, 0),
@@ -223,7 +223,11 @@ with st.form("order_form"):
     with col3:
         cargo_type = st.text_input("화물 종류", key="f_cargo")
     with col4:
-        weight_kg = st.number_input("중량(kg)", min_value=0.1, key="f_weight")
+        weight_kg = st.number_input(
+            "중량(kg)", min_value=500.0, key="f_weight",
+            help="이 계산기는 500kg 이상 화물(트럭 vs 철도 통합운송 비교)만 다룹니다. "
+                 "더 작은 화물은 별도 소형화물 서비스를 이용해 주세요.",
+        )
     with col5:
         long_side_cm = st.number_input("최장변(cm)", min_value=1.0, key="f_size")
 
@@ -293,38 +297,7 @@ if st.session_state.get("show_comparison"):
         road = {"distance_km": 0, "duration_min": 0}
         emission_cmp = None
 
-    # ── 2) 퀵서비스 (근거리·소형 한정, 위험물 등은 취급 불가) ──
-    quick_fare = estimate_quick_fare(road["distance_km"], weight_kg)
-    if quick_fare is not None and not is_mode_restricted(cargo_category, "퀵서비스"):
-        rows.append({
-            "수단": "퀵서비스",
-            "소요시간(분)": round(road["duration_min"] * 0.8),  # 급행 가정, 추정
-            "수령예상": _eta(road["duration_min"] * 0.8),
-            "요금(원)": apply_surcharge(quick_fare, cargo_category),
-            "데이터 성격": "추정치 (화물종류 할증 반영)",
-        })
-    elif quick_fare is not None:
-        st.info(f"퀵서비스: {cargo_category.value} 화물은 취급 제한으로 비교에서 제외")
-
-    # ── 3) KTX특송 (규격 충족 시만) ──
-    # ⚠️ 데모 단순화: 실제로는 출발/도착 주소를 KTX특송 취급역으로 매핑하는
-    # 로직이 필요합니다 (현재는 임의로 목록의 첫/끝 역을 사용).
-    eligible, reason = check_ktx_tucking_eligible(
-        KTX_TUCKING_STATIONS[0], KTX_TUCKING_STATIONS[-1],
-        long_side_cm, long_side_cm * 2, weight_kg,
-    )
-    if eligible and not is_mode_restricted(cargo_category, "KTX특송"):
-        rows.append({
-            "수단": "KTX특송",
-            "소요시간(분)": 240,  # 반나절 이내, 추정
-            "수령예상": _eta(240),
-            "요금(원)": "짐캐리 공시요금 확인 필요",
-            "데이터 성격": "규격: 실제 기준 / 요금: 미확정(TODO)",
-        })
-    elif eligible:
-        st.info(f"KTX특송: {cargo_category.value} 화물은 취급 제한으로 비교에서 제외")
-
-    # ── 4) 철도 통합운송 — 첫마일(트럭)+철도+막판마일(트럭) door-to-door ──
+    # ── 2) 철도 통합운송 — 첫마일(트럭)+철도+막판마일(트럭) door-to-door ──
     pool = get_mock_pool()
     new_order = ShipperOrder("NEW", origin_lat, origin_lng, dest_lat, dest_lng, weight_ton, desired_date)
     consolidation = evaluate_consolidation(new_order, pool)
@@ -473,8 +446,8 @@ if st.session_state.get("show_comparison"):
 
         # ── 예약 확정 → 공유 저장소 기록 ──────────────────────────
         # 실시간 Door-to-Door 추적·트럭기사 앱·관제센터 연계는 "철도 통합운송"
-        # 예약 건에 한정한다. 트럭 단독/퀵서비스/KTX특송은 화물역(CY) 환적
-        # 스테이지 자체가 없어 아래 후단 화면들의 데이터 모델과 맞지 않는다.
+        # 예약 건에 한정한다. 트럭 단독은 화물역(CY) 환적 스테이지 자체가
+        # 없어 아래 후단 화면들의 데이터 모델과 맞지 않는다.
         st.divider()
         st.subheader("예약 확정")
         rail_row = next((r for r in rows if r["수단"].startswith("철도 통합운송")), None)
